@@ -158,22 +158,28 @@ export class Brain {
     switch (event.type) {
       case 'run_start':
         this.turn = event.inputs[0] ?? null
+        this.message = -1
+        this.tool = null
         this.emit('turn.begin', { turnId: this.turn, source: this.turns.get(this.turn)?.source ?? 'text' })
         break
       case 'message_start':
         this.streamed = ''
+        if (event.message?.role === 'assistant') this.message = (this.message ?? -1) + 1
         break
       case 'message_update':
         for (const change of event.changes) {
           if (change.type !== 'text_delta') continue
           this.streamed += change.delta
-          this.emit('turn.delta', { turnId: this.turn, text: change.delta })
+          // text 是增量（语音管线用），full 是这条消息到目前为止的全文：界面按 (turnId, message) 覆盖显示，重放或重复收到都不会乱
+          this.emit('turn.delta', { turnId: this.turn, message: this.message, text: change.delta, full: this.streamed })
         }
         break
       case 'tool_execution_start':
+        this.tool = event.toolName
         this.emit('turn.tool', { turnId: this.turn, phase: 'start', toolCallId: event.toolCallId, name: event.toolName, args: event.args })
         break
       case 'tool_execution_end': {
+        this.tool = null
         const result = event.entry?.model?.[0]
         const summary = result?.content?.filter((b) => b.type === 'text').map((b) => b.text).join('\n').slice(0, 300)
         this.emit('turn.tool', { turnId: this.turn, phase: 'end', toolCallId: event.toolCallId, name: event.toolName, isError: Boolean(result?.isError), summary })
@@ -191,7 +197,7 @@ export class Brain {
           // 部分进度按间隔提交，短回复可能整段落在最后一次提交里，没有增量事件；把未发出的尾部补发
           const final = message.content.filter((b) => b.type === 'text').map((b) => b.text).join('')
           const rest = final.startsWith(this.streamed ?? '') ? final.slice((this.streamed ?? '').length) : ''
-          if (rest) this.emit('turn.delta', { turnId: this.turn, text: rest })
+          if (rest) this.emit('turn.delta', { turnId: this.turn, message: this.message, text: rest, full: final })
           this.streamed = ''
         }
         if (message?.role === 'assistant' && message.stopReason === 'error') {
@@ -203,6 +209,7 @@ export class Brain {
         this.emit('turn.end', { turnId: this.turn })
         this.turns.delete(this.turn)
         this.turn = null
+        this.tool = null
         break
     }
   }

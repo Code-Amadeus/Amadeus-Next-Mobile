@@ -1,4 +1,4 @@
-import { on, request } from './bridge.ts'
+import { catchUp, on, request, startSync } from './bridge.ts'
 import { createEmoteRenderer, type EmoteCharacter } from './emote.ts'
 
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector(selector) as T
@@ -14,7 +14,8 @@ const subtitle = $('#subtitle')
 const youSaid = $('#you-said')
 
 let busy = false
-let herBubble: HTMLElement | null = null
+// 回复气泡按 (回合, 第几条消息) 索引：同一条消息的全文反复到达时只覆盖，不追加
+const bubbles = new Map<string, HTMLElement>()
 let lastSpeaker: 'me' | 'her' | null = null
 
 const VERB_NAMES: Record<string, string> = {
@@ -261,7 +262,6 @@ on('voice.asr', ({ status, text, error }) => {
 
 on('turn.begin', () => {
   busy = true
-  herBubble = null
   subtitle.textContent = ''
   subtitle.hidden = true
   setPresence('思考中…')
@@ -279,23 +279,23 @@ function reason(summary: unknown): string {
   return line ? line.slice(0, 80) : '原因未知'
 }
 
-/** 回到前台时重新同步：后台期间丢掉的事件（回复、回合结束）由这里补上。 */
-async function resync() {
-  await showSession()
-  try {
-    const state = await request('chat.state')
-    busy = Boolean(state.busy)
-    setPresence(busy ? '思考中…' : null)
-    syncComposer()
-  } catch { /* 控制面重启中，下一次事件会更新状态 */ }
-}
-document.addEventListener('visibilitychange', () => { if (!document.hidden) resync() })
-on('turn.error', ({ message: text }) => notice(`出错了：${text}`))
-on('turn.end', () => {
-  busy = false
-  setPresence(null)
-  syncComposer()
+on('turn.delta', ({ turnId, message: index, full }) => {
+  const key = `${turnId}:${index}`
+  const text = displayText(full ?? '')
+  if (!text) return
+  let bubble = bubbles.get(key)
+  if (!bubble) { bubble = message('her', ''); bubbles.set(key, bubble) }
+  bubble.textContent = text
+  scrollToEnd()
+  if (busy && $('#presence').textContent === '思考中…') setPresence('正在说话')
 })
+on('turn.error', ({ message: text }) => notice(`出错了：${text}`))
+// 回合结束以控制面的记录为准重新渲染：过程中的流式显示只是预览
+on('turn.end', () => { render() })
+
+// 回到前台：按序号补拉后台期间的事件
+on('ui.resume', () => { catchUp() })
+document.addEventListener('visibilitychange', () => { if (!document.hidden) catchUp() })
 
 // 语音事件：字幕、表情与口型；音频本身由宿主的 AudioTrack 播放
 let speech = false
@@ -307,18 +307,13 @@ on('voice.event', (event) => {
   } else if (event.type === 'activity') {
     character?.dispatch({ type: 'activity', activity: event.activity })
   } else if (event.type === 'text') {
+    // 聊天气泡由 turn.delta 负责；这里只管视频模式的字幕与表情
     const value = event.value
     const display = value.display ?? value.text
-    if (display) {
-      herBubble ??= message('her', '')
-      herBubble.textContent += display
-      scrollToEnd()
-      if (callActive) {
-        youSaid.hidden = true
-        subtitle.hidden = false
-        subtitle.textContent = (subtitle.textContent + display).slice(-70)
-      }
-      if (busy && $('#presence').textContent === '思考中…') setPresence('正在说话')
+    if (display && callActive) {
+      youSaid.hidden = true
+      subtitle.hidden = false
+      subtitle.textContent = (subtitle.textContent + display).slice(-70)
     }
     for (const cue of value.cues) character?.dispatch({ type: 'cue', emotion: cue.emotion })
   } else if (event.type === 'reset') {
@@ -345,13 +340,11 @@ on('voice.playback', ({ type, rms }) => {
   }
 })
 
-let kernelReady = false
 on('kernel.state', ({ state, detail }) => {
   const banner = $('#kernel')
   banner.hidden = state === 'READY'
-  // 控制面（重新）就绪时补拉一次：页面可能比控制面先起来，或控制面刚重启过
-  if (state === 'READY' && !kernelReady) resync()
-  kernelReady = state === 'READY'
+  // 控制面（重新）就绪：重启前进行中的回合不会再有结束事件，以控制面现状为准重新渲染
+  if (state === 'READY') render()
   banner.textContent = `${state === 'STARTING' ? '正在醒来' : state === 'RESTARTING' ? '正在恢复' : '已停止'}：${detail}`
 })
 
@@ -374,19 +367,35 @@ function sheet(id: string) {
 const menu = sheet('menu')
 const sessionsSheet = sheet('sessions')
 
-/** 把聊天区清空并换成当前会话的记录。 */
-async function showSession() {
-  for (const node of [...log.children]) if (node.id !== 'welcome') node.remove()
-  lastSpeaker = null
-  herBubble = null
-  $('#welcome').hidden = false
-  try {
-    const { items } = await request('chat.history', { limit: 60 })
-    for (const item of items) message(item.role === 'assistant' ? 'her' : 'me', item.role === 'assistant' ? displayText(item.text) : item.text)
-  } catch { /* 控制面尚未就绪，后续消息照常显示 */ }
+/**
+ * 以控制面为准渲染整个对话区：当前会话的记录 + 是否正在回复。
+ * 页面加载、补拉不上、回合结束、换会话、控制面重启时都走这里，界面状态因此不会因漏事件而错乱。
+ */
+let rendering: Promise<void> | null = null
+let renderAgain = false
+function render(): Promise<void> {
+  // 渲染中又有新的触发（比如回合刚结束）：这一轮取到的记录可能已过时，结束后再来一轮
+  if (rendering) { renderAgain = true; return rendering }
+  rendering = (async () => {
+    try {
+      const [{ items }, state] = await Promise.all([request('chat.history', { limit: 60 }), request('chat.state')])
+      for (const node of [...log.children]) if (node.id !== 'welcome') node.remove()
+      bubbles.clear()
+      lastSpeaker = null
+      $('#welcome').hidden = items.length > 0
+      for (const item of items) message(item.role === 'assistant' ? 'her' : 'me', item.role === 'assistant' ? displayText(item.text) : item.text)
+      busy = Boolean(state.busy)
+      setPresence(busy ? (state.tool ? `正在${VERB_NAMES[state.tool] ?? state.tool}` : '思考中…') : null)
+      syncComposer()
+    } catch { /* 控制面尚未就绪；就绪后的 kernel.state 会再渲染一次 */ } finally {
+      rendering = null
+      if (renderAgain) { renderAgain = false; render() }
+    }
+  })()
+  return rendering
 }
 
-on('session.changed', () => { showSession() })
+on('session.changed', () => { render() })
 
 async function newChat() {
   vibrate(10)
@@ -580,10 +589,16 @@ $('#save').addEventListener('click', async () => {
 
 // ---- 启动 ----
 
-/** 历史记录里是原始的 <zh>/<jp> 文本，只取字幕部分显示。 */
+/**
+ * 回复原文是 <zh>字幕</zh><jp>口播</jp>，只显示字幕。流式到达时最后一个标签可能还没闭合：
+ * 未闭合的 <zh> 照样显示已到的部分，未闭合的 <jp> 整段跳过。
+ */
 function displayText(raw: string): string {
-  const zh = [...raw.matchAll(/<zh>([\s\S]*?)<\/zh>/g)].map((m) => m[1]).join('')
-  return zh || raw.replace(/<[^>]+>/g, '')
+  const withoutSpeech = raw.replace(/<jp>[\s\S]*?(<\/jp>|$)/g, '')
+  const zh = [...withoutSpeech.matchAll(/<zh>([\s\S]*?)(<\/zh>|$)/g)].map((m) => m[1]).join('')
+  if (zh) return zh
+  // 没按格式写的回复（偶尔会有）：去掉标签直接显示
+  return withoutSpeech.replace(/<\/?[a-z]+>/g, '').replace(/\[EMO[^\]]*\]/g, '').trim()
 }
 
 syncComposer()
@@ -591,4 +606,4 @@ if (sessionStorage.getItem('resumeCall')) {
   sessionStorage.removeItem('resumeCall')
   startCall()
 }
-showSession()
+startSync(render)

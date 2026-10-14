@@ -67,14 +67,15 @@ class MainActivity : Activity() {
         setContentView(web)
         web.loadUrl("https://appassets.androidplatform.net/assets/web/index.html")
         // 事件通道跟随整个 Activity：她按 HOME 把应用切到后台时，回复和回合结束仍要送进网页
-        Kernel.web = { method, params -> dispatch(method, params) }
+        Kernel.web = { method, params, seq -> dispatch(method, params, seq) }
         requestRuntimePermissions()
         KernelService.start(this)
     }
 
     override fun onResume() {
         super.onResume()
-        dispatch("kernel.state", JSONObject().put("state", Kernel.last.first.name).put("detail", Kernel.last.second))
+        // 回到前台时让网页按序号补拉后台期间的事件
+        dispatch("ui.resume", "{}", 0)
         ConfirmGate.presenter = object : ConfirmGate.Presenter {
             override fun show(nonce: String, prompt: String) = runOnUiThread {
                 dialogs[nonce] = AlertDialog.Builder(this@MainActivity)
@@ -110,8 +111,8 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    private fun dispatch(method: String, params: JSONObject) {
-        web.evaluateJavascript("window.amadeus&&window.amadeus.event(${JSONObject.quote(method)},${JSONObject.quote(params.toString())})", null)
+    private fun dispatch(method: String, params: String, seq: Long) {
+        web.evaluateJavascript("window.amadeus&&window.amadeus.event(${JSONObject.quote(method)},${JSONObject.quote(params)},$seq)", null)
     }
 
     private fun reply(id: String, value: JSONObject) = runOnUiThread {
@@ -178,6 +179,14 @@ class MainActivity : Activity() {
             val args = runCatching { JSONObject(params) }.getOrElse { JSONObject() }
             when (method) {
                 "host.status" -> reply(id, hostStatus())
+                "ui.replay" -> {
+                    val replay = Kernel.feed.since(args.optLong("after", 0))
+                    val events = org.json.JSONArray()
+                    for (event in replay.events) {
+                        events.put(JSONObject().put("seq", event.seq).put("method", event.method).put("params", JSONObject(event.params)))
+                    }
+                    reply(id, JSONObject().put("status", "done").put("latest", replay.latest).put("complete", replay.complete).put("events", events))
+                }
                 "host.open" -> { runOnUiThread { open(args.optString("target")) }; reply(id, JSONObject().put("status", "done")) }
                 "audit.list" -> {
                     val service = Kernel.service

@@ -77,7 +77,11 @@ test('runs a tool loop through the execution plane and streams turn events', asy
   const tools = events.filter((e) => e.method === 'turn.tool' && e.phase === 'end')
   assert.deepEqual(tools.map((e) => e.name), ['observe', 'click'])
   assert.match(tools[0].summary, /screen_content/)
-  assert.ok(events.some((e) => e.method === 'turn.delta'))
+  const deltas = events.filter((e) => e.method === 'turn.delta')
+  assert.ok(deltas.length)
+  // full 是累计全文，最后一条等于完整回复
+  assert.match(deltas.at(-1).full, /设置已打开/)
+  assert.equal(typeof deltas.at(-1).message, 'number')
   const history = brain.history()
   assert.equal(history[0].role, 'user')
   assert.match(history.at(-1).text, /设置已打开/)

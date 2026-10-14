@@ -54,7 +54,7 @@ class KernelService : LifecycleService() {
         router = VerbRouter(this, AuditLog(this)) { camera }
         player = Player { type, key, rms ->
             if (type != "level") host?.event("voice.playback", JSONObject(key.toString()).put("type", type).apply { remove("speech"); remove("calibration") })
-            Kernel.webEvent("voice.playback", JSONObject().put("type", type).put("rms", rms.toDouble()))
+            Kernel.webEvent("voice.playback", JSONObject().put("type", type).put("rms", rms.toDouble()), durable = false)
         }
         recognizer = Recognizer(this) { message -> host?.event("asr.message", message) }
         Thread({ boot() }, "kernel-boot").start()
@@ -112,8 +112,10 @@ class KernelService : LifecycleService() {
             "asr.command" -> recognizer.command(params)
             "voice.event" -> {
                 player.event(params, message.body)
-                if (params.optString("type") != "audio") Kernel.webEvent(method, params)
+                if (params.optString("type") != "audio") Kernel.webEvent(method, params, durable = false)
             }
+            // 识别中间结果、字幕与口型都是一闪而过的，错过不必重放
+            "voice.asr" -> Kernel.webEvent(method, params, durable = false)
             "ready" -> Unit
             else -> Kernel.webEvent(method, params)
         }
@@ -172,7 +174,10 @@ class KernelService : LifecycleService() {
 object Kernel {
     @Volatile var service: KernelService? = null
     @Volatile var notifyPackages: Set<String> = emptySet()
-    @Volatile var web: ((String, JSONObject) -> Unit)? = null
+    /** 网页的事件入口：方法名、参数 JSON、序号（0 表示不进日志的瞬时事件）。 */
+    @Volatile var web: ((String, String, Long) -> Unit)? = null
+    /** 发往界面的事件日志；放在服务进程里，Activity 重建后照样能补拉。 */
+    val feed = UiFeed()
     private val main = Handler(Looper.getMainLooper())
     private val listeners = mutableListOf<(KernelHost.State, String) -> Unit>()
     @Volatile var last: Pair<KernelHost.State, String> = KernelHost.State.STARTING to ""
@@ -189,9 +194,15 @@ object Kernel {
         return { main.post { listeners -= listener } }
     }
 
-    fun webEvent(method: String, params: JSONObject) {
+    /**
+     * durable 的事件先编号进日志再推送：界面不在时不丢，回来按序号重放。
+     * 推送本身尽力而为，可靠性由界面的序号检查与重放保证。
+     */
+    fun webEvent(method: String, params: JSONObject, durable: Boolean = true) {
+        val json = params.toString()
+        val seq = if (durable) feed.append(method, json).seq else 0L
         val sink = web ?: return
-        main.post { sink(method, params) }
+        main.post { sink(method, json, seq) }
     }
 
     private const val PREFS = "proactive"
