@@ -57,6 +57,8 @@ async function main() {
   })
   host.handle('chat.abort', () => { voice.abort(); return brain.abort() })
   host.handle('chat.history', ({ limit }) => ({ items: brain.history(Number(limit) || 50) }))
+  // 界面回到前台时据此重新同步，补上后台期间可能漏掉的事件
+  host.handle('chat.state', () => ({ busy: brain.busy, sessionId: brain.conv.id }))
   host.handle('session.new', () => { voice.abort(); return brain.newSession() })
   host.handle('session.list', () => brain.listSessions())
   host.handle('session.switch', ({ id }) => { voice.abort(); return brain.switchSession(id) })

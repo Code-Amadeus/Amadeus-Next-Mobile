@@ -66,13 +66,14 @@ class MainActivity : Activity() {
         window.navigationBarColor = android.graphics.Color.parseColor("#0f0d12")
         setContentView(web)
         web.loadUrl("https://appassets.androidplatform.net/assets/web/index.html")
+        // 事件通道跟随整个 Activity：她按 HOME 把应用切到后台时，回复和回合结束仍要送进网页
+        Kernel.web = { method, params -> dispatch(method, params) }
         requestRuntimePermissions()
         KernelService.start(this)
     }
 
     override fun onResume() {
         super.onResume()
-        Kernel.web = { method, params -> dispatch(method, params) }
         dispatch("kernel.state", JSONObject().put("state", Kernel.last.first.name).put("detail", Kernel.last.second))
         ConfirmGate.presenter = object : ConfirmGate.Presenter {
             override fun show(nonce: String, prompt: String) = runOnUiThread {
@@ -91,7 +92,6 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         ConfirmGate.presenter = null
-        Kernel.web = null
         super.onPause()
     }
 
@@ -105,6 +105,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        Kernel.web = null
         web.destroy()
         super.onDestroy()
     }

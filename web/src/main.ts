@@ -269,9 +269,27 @@ on('turn.begin', () => {
 })
 on('turn.tool', ({ phase, name, isError, summary }) => {
   if (phase === 'start') setPresence(`正在${VERB_NAMES[name] ?? name}`)
-  else if (isError) notice(`${VERB_NAMES[name] ?? name}没成功：${String(summary || '').split('\n')[0]}`)
+  else if (isError) notice(`${VERB_NAMES[name] ?? name}没成功：${reason(summary)}`)
 })
 on('turn.notice', ({ text }) => toast(text))
+
+/** 工具错误里带有 <harness> 之类的内部标签，只取第一句有意义的话。 */
+function reason(summary: unknown): string {
+  const line = String(summary || '').split('\n').map((l) => l.replace(/<\/?[\w-]+>/g, '').trim()).find(Boolean)
+  return line ? line.slice(0, 80) : '原因未知'
+}
+
+/** 回到前台时重新同步：后台期间丢掉的事件（回复、回合结束）由这里补上。 */
+async function resync() {
+  await showSession()
+  try {
+    const state = await request('chat.state')
+    busy = Boolean(state.busy)
+    setPresence(busy ? '思考中…' : null)
+    syncComposer()
+  } catch { /* 控制面重启中，下一次事件会更新状态 */ }
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) resync() })
 on('turn.error', ({ message: text }) => notice(`出错了：${text}`))
 on('turn.end', () => {
   busy = false
@@ -327,9 +345,13 @@ on('voice.playback', ({ type, rms }) => {
   }
 })
 
+let kernelReady = false
 on('kernel.state', ({ state, detail }) => {
   const banner = $('#kernel')
   banner.hidden = state === 'READY'
+  // 控制面（重新）就绪时补拉一次：页面可能比控制面先起来，或控制面刚重启过
+  if (state === 'READY' && !kernelReady) resync()
+  kernelReady = state === 'READY'
   banner.textContent = `${state === 'STARTING' ? '正在醒来' : state === 'RESTARTING' ? '正在恢复' : '已停止'}：${detail}`
 })
 
