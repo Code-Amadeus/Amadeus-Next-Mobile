@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace = "com.amadeus.mobile"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.amadeus.mobile"
@@ -19,6 +19,8 @@ android {
     sourceSets {
         getByName("main") {
             assets.directories += rootProject.file("../payload/build/assets").path
+            // 前端、识别模型与 emote 素材，由 scripts/fetch-deps.mjs 与 web/build.mjs 生成
+            assets.directories += rootProject.file("../build/assets").path
             jniLibs.directories += rootProject.file("../payload/build/jniLibs").path
         }
     }
@@ -42,6 +44,15 @@ android {
 }
 
 dependencies {
+    implementation("androidx.core:core-ktx:1.19.1")
+    implementation("androidx.webkit:webkit:1.17.1")
+    implementation("androidx.lifecycle:lifecycle-service:2.11.0")
+    implementation("androidx.camera:camera-core:1.6.2")
+    implementation("androidx.camera:camera-camera2:1.6.2")
+    implementation("androidx.camera:camera-lifecycle:1.6.2")
+    implementation("androidx.camera:camera-video:1.6.2")
+    // 端侧流式识别；AAR 由 scripts/fetch-deps.mjs 按锁定的 sha256 下载
+    implementation(files("libs/sherpa-onnx.aar"))
     testImplementation("junit:junit:4.13.2")
     // android.jar 里的 org.json 在 JVM 单元测试中只是抛异常的桩
     testImplementation("org.json:json:20260814")

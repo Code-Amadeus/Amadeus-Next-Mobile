@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Amadeus</string>
+    <string name="a11y_description">让红莉栖读取屏幕并按你的要求操作手机。每个动作都会记录在应用的「动作」页；发送、购买、删除等操作会先请你确认，支付和密码界面她无法读取或操作。</string>
 </resources>

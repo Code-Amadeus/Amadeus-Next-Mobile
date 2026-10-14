@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no, interactive-widget=resizes-content">
+<meta name="color-scheme" content="dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'">
+<title>Amadeus</title>
+<link rel="stylesheet" href="style.css">
+<script>
+  // FreeMoteDriver 是 emscripten 产物，堆大小须在加载前给出
+  var Module = { TOTAL_MEMORY: 512 * 1024 * 1024 };
+  (function () {
+    var SCRIPTS = ["emote/pixi.min.js", "emote/FreeMoteDriver.js", "emote/emoteplayer.js"];
+    function loadAt(i) {
+      if (i >= SCRIPTS.length) { window.dispatchEvent(new Event("amadeus:runtime-ready")); return; }
+      var s = document.createElement("script");
+      s.src = SCRIPTS[i];
+      s.onload = function () {
+        // 顶层 class 声明不会成为 window 属性
+        if (SCRIPTS[i] === "emote/emoteplayer.js") window.EmotePlayer = EmotePlayer;
+        loadAt(i + 1);
+      };
+      s.onerror = function () {
+        document.getElementById("stage-error").textContent = "立绘运行时加载失败";
+        window.dispatchEvent(new Event("amadeus:runtime-ready"));
+      };
+      document.head.appendChild(s);
+    }
+    loadAt(0);
+  })();
+</script>
+</head>
+<body>
+<div id="app">
+  <!-- 舞台：立绘铺满上半屏，字幕与状态浮在上面 -->
+  <div id="stage">
+    <div id="stage-error"></div>
+    <header id="topbar">
+      <div id="state" class="chip" hidden></div>
+      <div class="spacer"></div>
+      <button class="icon" id="open-activity" aria-label="动作记录">
+        <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h13"/></svg>
+      </button>
+      <button class="icon" id="open-settings" aria-label="设置">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7"/></svg>
+      </button>
+    </header>
+    <div id="kernel" hidden></div>
+    <div id="subtitle" hidden></div>
+  </div>
+
+  <!-- 对话：默认只露出最近几条，上滑或点把手展开 -->
+  <section id="chat" class="collapsed">
+    <div class="grip" id="chat-grip"><span></span></div>
+    <div id="log"></div>
+  </section>
+
+  <!-- 底部操作区：拇指可达 -->
+  <footer id="dock">
+    <div id="hearing" hidden></div>
+    <div id="voice-mode" class="row">
+      <button class="icon round" id="to-keyboard" aria-label="打字">
+        <svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg>
+      </button>
+      <button id="mic" aria-label="说话">
+        <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+        <span>点一下说话</span>
+      </button>
+      <button class="icon round" id="stop" aria-label="停止" hidden>
+        <svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+      </button>
+      <div class="round-placeholder" id="stop-placeholder"></div>
+    </div>
+    <div id="text-mode" class="row" hidden>
+      <button class="icon round" id="to-voice" aria-label="语音">
+        <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+      </button>
+      <textarea id="input" rows="1" enterkeyhint="send" placeholder="和红莉栖说点什么…"></textarea>
+      <button class="icon round accent" id="send" aria-label="发送">
+        <svg viewBox="0 0 24 24"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
+      </button>
+    </div>
+  </footer>
+</div>
+
+<!-- 底部面板：动作记录 -->
+<div class="sheet" id="activity" hidden>
+  <div class="scrim"></div>
+  <div class="panel">
+    <div class="grip"><span></span></div>
+    <h2>她做过的事</h2>
+    <p class="hint">每个动作都经过 Guard 判决：<b class="ok">放行</b> · <b class="confirmed">你确认过</b> · <b class="denied">你拒绝了</b> · <b class="blocked">被拦下</b></p>
+    <div id="verbs"></div>
+  </div>
+</div>
+
+<!-- 全屏页：设置 -->
+<div class="page" id="settings" hidden>
+  <header class="pagebar">
+    <button class="icon" id="close-settings" aria-label="返回"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
+    <h1>设置</h1>
+    <button class="text" id="save">保存</button>
+  </header>
+  <form id="settings-form" autocomplete="off">
+    <h3>权限</h3>
+    <div class="group" id="permissions"></div>
+
+    <h3>模型</h3>
+    <div class="group">
+      <label class="field"><span>协议</span>
+        <select name="api">
+          <option value="openai-responses">OpenAI Responses</option>
+          <option value="anthropic-messages">Anthropic Messages</option>
+          <option value="openai-completions">OpenAI Chat Completions</option>
+        </select>
+      </label>
+      <label class="field"><span>Base URL</span><input name="baseUrl" type="url" inputmode="url" placeholder="https://api.example.com/v1"></label>
+      <label class="field"><span>模型名</span><input name="modelId" placeholder="model id"></label>
+      <label class="field"><span>API Key</span><input name="modelApiKey" type="password"></label>
+      <label class="switch"><span>能看图</span><input name="vision" type="checkbox"><i></i></label>
+      <label class="switch"><span>推理模型</span><input name="reasoning" type="checkbox"><i></i></label>
+    </div>
+
+    <h3>声音</h3>
+    <div class="group">
+      <label class="switch"><span>朗读回复</span><input name="speech" type="checkbox"><i></i></label>
+      <label class="switch"><span>常开监听<small>说完自动继续听，更耗电</small></span><input name="continuous" type="checkbox"><i></i></label>
+      <label class="field"><span>Fish Audio Key</span><input name="fishApiKey" type="password"></label>
+      <label class="field"><span>Voice ID</span><input name="fishVoiceId" placeholder="留空用默认音色"></label>
+    </div>
+
+    <h3>通知</h3>
+    <div class="group">
+      <label class="field stacked"><span>这些应用来通知时告诉我<small>每行一个包名，如 com.tencent.mm</small></span>
+        <textarea name="notifyPackages" rows="3"></textarea>
+      </label>
+    </div>
+  </form>
+</div>
+
+<div id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

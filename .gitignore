@@ -2,3 +2,6 @@ node_modules/
 payload/.cache/
 payload/build/
 .DS_Store
+.cache/
+build/
+android/app/libs/

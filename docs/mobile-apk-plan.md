@@ -65,7 +65,7 @@ flowchart TB
 | `amadeus-control` | 控制面：`Harness.open(openNodeSqliteStorage(file))` 装配会话与工具循环，`pi-ai` 负责模型与登录 |
 | `amadeus-phone` extension | 动词工具，经 UDS 转发给宿主；纯转发，无业务逻辑 |
 | voice 模块 | 控制面内，移植自 amadeus-next：轮次闸门、口播/字幕拆分、Fish TTS 流式合成 |
-| WebView | 聊天、状态、动词日志、审计记录、首次配置；只加载 APK 内置页面，不直接碰网络与磁盘 |
+| WebView | 移动端界面：emote 立绘铺满上半屏，对话浮层可上滑展开，底部点按说话 / 键盘切换；动作记录为底部面板，设置为全屏页。只加载 APK 内置页面，不直接碰网络与磁盘 |
 
 ## 三、关键时序
 
@@ -225,7 +225,7 @@ sequenceDiagram
     participant TTS as FishTts
     participant FISH as Fish Audio
 
-    U->>VS: 按住说话
+    U->>VS: 点一下说话
     VS->>FL: voice.listen start
     FL-->>VS: asr.command start
     VS-->>FL: asr.message status listening
@@ -256,7 +256,8 @@ sequenceDiagram
 
 - **回声**：外放会被麦克风收进去。沿用 Floor 规则（她说话时不开识别），录音源用 `VOICE_COMMUNICATION` 启用系统回声消除
 - **打断**：说话中点"停止"即 `chat.abort`，TTS generation +1，过期音频帧由 `AudioTrack` 侧按 TurnKey 丢弃
-- **麦克风权限**：`RECORD_AUDIO`，由前台服务持有；默认按住说话，常开监听为可选项
+- **麦克风权限**：`RECORD_AUDIO`，由前台服务持有；点一下开始听、停顿 1.5 s 自动发送（或再点一下立即发送），常开监听为可选项
+- **不用按住说话**：三星等系统的长按识屏服务会在约 1.5 s 时抢走长按手势（应用层拦不住），所以改为点按
 - **降级**：Fish 不可用时与 amadeus-next 一致——回合照常完成，只显示文字
 - **凭据**：`FISH_API_KEY` 与模型凭据同等处理（第七节）；Fish 是控制面唯一新增的出站连接，不新增监听
 
@@ -302,6 +303,7 @@ sequenceDiagram
 | `list_apps` | — | 包名与名称列表 |
 | `wait` | `{ms}`（≤ 10 s） | — |
 | `camera_snap` / `camera_clip` | facing/quality；时长 ≤ 60s | 图片 / 视频路径（私有工作区） |
+| `remind_set` / `remind_list` / `remind_cancel` | `{message, inMinutes \| at}` / — / `{id}` | 提醒登记在 AlarmManager，到点以主动开口唤醒她 |
 
 编号带快照前缀（`s41:12`）。宿主只接受**最新快照**的编号，界面变化后旧编号一律 `stale_ref`，避免点错位置；坐标动作同样要求在最近一次 observe 之后界面未变化。
 
@@ -426,7 +428,7 @@ sequenceDiagram
 | **1 控制面裸跑** | payload 组装脚本（Termux aarch64 包 + 依赖树，native 件进 jniLibs，sha256 锁定）+ amadeus-control + KernelHost | `node:sqlite` 可用；会话落 sqlite 并跨重启恢复 |
 | **2 执行面接入** | extension + UDS + VerbRouter | 模型经 observe/click 打开设置；screenshot 可用并返回图片；Guard 拦截支付界面 |
 | **3 她说话** | WebView + 登录 + 摄像头 + 语音（移植 amadeus-next voice 模块 + VoiceService） | 对话闭环；拍照出图；语音说"打开设置"并听到回答；杀 App 后会话恢复 |
-| **4 人格完整** | 主动开口 | 开口/静默正确 |
+| **4 人格完整** | 主动开口：提醒工具到点触发；设置里勾选的应用来通知时转述（通知内容按不可信数据处理，限流） | 提醒准点开口；通知只转述所选应用，主人说话或回合进行中时排队 |
 
 ## 十一、pi 工具设计
 
@@ -440,6 +442,7 @@ sequenceDiagram
 | `launch_app` / `list_apps` / `wait` | amadeus-phone | 同上；支付 / 银行类包名不可启动 |
 | `screenshot` | amadeus-phone | 节点树读不到的内容（图片、游戏、自绘控件）才用；约每秒一次；`FLAG_SECURE` 窗口为黑屏；敏感界面被 Guard 拒绝 |
 | `camera_snap` / `camera_clip` | amadeus-phone | 阶段 3；后台受限时返回 `camera_denied` |
+| `remind_set` / `remind_list` / `remind_cancel` | amadeus-phone | 提醒由宿主的 AlarmManager 登记，重启后补登记 |
 | `read` | pi-durable/tools | 仅限 App 私有工作区，用于读取拍照结果与自身笔记 |
 | `write` / `edit` | pi-durable/tools | 仅限私有工作区，不可写 rootfs 与 App 其他目录 |
 
@@ -514,7 +517,7 @@ sequenceDiagram
 
 ### 场景二：语音查询今天的天气
 
-主人按住说话："今天天气怎么样？"
+主人点一下说话："今天天气怎么样？"
 
 ```mermaid
 sequenceDiagram

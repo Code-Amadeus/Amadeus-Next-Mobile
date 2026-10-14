@@ -1,0 +1,133 @@
+:root {
+  --bg: #0f0d12; --surface: #1b1820; --surface-2: #26222c; --line: rgba(255,255,255,.08);
+  --fg: #f1edf5; --muted: #a29aab; --accent: #d0454f; --accent-2: #ff6b74; --user: #2f5470;
+  --ok: #8fd18f; --warn: #f0c27a; --bad: #ef8a8a;
+  --safe-top: env(safe-area-inset-top); --safe-bottom: env(safe-area-inset-bottom);
+  --dock: 112px;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+/* 组件样式里的 display 会压过 hidden 属性的默认隐藏 */
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); overflow: hidden; overscroll-behavior: none;
+  font: 16px/1.5 -apple-system, "Noto Sans CJK SC", "Source Han Sans SC", sans-serif; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+input, textarea, select { -webkit-user-select: text; user-select: text; font: inherit; color: inherit; }
+button { font: inherit; color: inherit; border: 0; background: none; padding: 0; }
+svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+#app { position: fixed; inset: 0; }
+
+/* 舞台：立绘铺满，底部渐隐进对话区 */
+#stage { position: absolute; inset: 0 0 var(--dock) 0;
+  background: radial-gradient(120% 70% at 50% 35%, #2a2230 0%, var(--bg) 70%); }
+#stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+/* 人物底边停在舞台 78% 处（main.ts 的 bottom），渐隐在那里正好完全融进背景 */
+#stage::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 45%; pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--bg) 50%); }
+#stage-error { position: absolute; left: 16px; right: 16px; top: calc(var(--safe-top) + 72px); z-index: 3; color: var(--muted); font-size: 13px; text-align: center; }
+
+#topbar { position: absolute; z-index: 4; top: 0; left: 0; right: 0; display: flex; align-items: center; gap: 4px;
+  padding: calc(var(--safe-top) + 8px) 8px 8px 16px; }
+.spacer { flex: 1; }
+.chip { padding: 6px 12px; border-radius: 999px; background: rgba(20,17,24,.72); backdrop-filter: blur(12px);
+  font-size: 13px; color: var(--fg); max-width: 60vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chip::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; background: var(--accent-2);
+  animation: pulse 1.2s ease-in-out infinite; vertical-align: 1px; }
+@keyframes pulse { 50% { opacity: .3; } }
+.icon { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 50%; color: var(--fg); }
+.icon:active { background: rgba(255,255,255,.08); }
+
+#kernel { position: absolute; z-index: 4; top: calc(var(--safe-top) + 64px); left: 16px; right: 16px; padding: 10px 14px; border-radius: 12px;
+  background: rgba(58,42,20,.9); color: #f5d39b; font-size: 13px; }
+
+/* 字幕：贴在立绘下方的气泡 */
+#subtitle { position: absolute; z-index: 3; left: 20px; right: 20px; bottom: 34%; padding: 12px 16px; border-radius: 18px;
+  background: rgba(20,17,24,.78); backdrop-filter: blur(14px); font-size: 17px; line-height: 1.55; text-align: center;
+  box-shadow: 0 8px 24px rgba(0,0,0,.35); animation: rise .25s ease-out; }
+@keyframes rise { from { transform: translateY(8px); opacity: 0; } }
+
+/* 对话浮层：收起时只露出最近几条，展开后占大半屏 */
+#chat { position: absolute; z-index: 5; left: 0; right: 0; bottom: var(--dock); display: flex; flex-direction: column;
+  height: 32vh; transition: height .28s cubic-bezier(.2,.8,.2,1); }
+#chat.expanded { height: calc(100% - var(--dock) - var(--safe-top) - 56px); background: var(--bg); border-radius: 20px 20px 0 0;
+  box-shadow: 0 -12px 32px rgba(0,0,0,.45); }
+#chat.collapsed #log { -webkit-mask-image: linear-gradient(to bottom, transparent, #000 40%); mask-image: linear-gradient(to bottom, transparent, #000 40%); }
+.grip { flex: none; height: 28px; display: grid; place-items: center; touch-action: none; }
+.grip span { width: 40px; height: 4px; border-radius: 2px; background: rgba(255,255,255,.25); }
+#log { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 16px 12px; display: flex; flex-direction: column; gap: 10px; overscroll-behavior: contain; }
+#log:empty::before { content: "点下面的按钮和她说话"; margin: auto; color: var(--muted); font-size: 14px; }
+.bubble { max-width: 82%; padding: 10px 14px; border-radius: 20px; white-space: pre-wrap; word-break: break-word; font-size: 16px; }
+.bubble.user { align-self: flex-end; background: var(--user); border-bottom-right-radius: 6px; }
+.bubble.assistant { align-self: flex-start; background: var(--surface-2); border-bottom-left-radius: 6px; }
+.bubble.notice { align-self: center; max-width: 92%; padding: 6px 12px; background: rgba(255,255,255,.06); color: var(--muted); font-size: 13px; text-align: center; }
+
+/* 底部操作区 */
+#dock { position: absolute; z-index: 6; left: 0; right: 0; bottom: 0; min-height: var(--dock);
+  padding: 8px 16px calc(var(--safe-bottom) + 16px); background: var(--bg); }
+#hearing { position: absolute; left: 16px; right: 16px; bottom: calc(100% + 8px); padding: 10px 14px; border-radius: 16px;
+  background: var(--surface-2); font-size: 15px; text-align: center; }
+.row { display: flex; align-items: center; gap: 12px; }
+.round { flex: none; width: 52px; height: 52px; background: var(--surface); }
+.round.accent { background: var(--accent); }
+.round-placeholder { flex: none; width: 52px; height: 52px; }
+#mic { flex: 1; height: 64px; border-radius: 32px; background: var(--surface-2); display: flex; align-items: center; justify-content: center; gap: 10px;
+  font-size: 17px; touch-action: none; transition: transform .12s, background .12s; }
+#mic svg { width: 26px; height: 26px; }
+#mic.active { background: var(--accent); transform: scale(1.04); box-shadow: 0 0 0 10px rgba(208,69,79,.18), 0 0 0 22px rgba(208,69,79,.08); }
+#stop { background: var(--surface-2); color: var(--accent-2); }
+#input { flex: 1; resize: none; max-height: 120px; min-height: 52px; padding: 13px 16px; border-radius: 26px; border: 0; background: var(--surface-2); outline: none; }
+
+/* 底部面板 */
+.sheet { position: fixed; inset: 0; z-index: 20; }
+.scrim { position: absolute; inset: 0; background: rgba(0,0,0,.5); animation: fade .2s; }
+@keyframes fade { from { opacity: 0; } }
+.panel { position: absolute; left: 0; right: 0; bottom: 0; max-height: 82vh; display: flex; flex-direction: column;
+  padding: 0 16px calc(var(--safe-bottom) + 12px); border-radius: 22px 22px 0 0; background: var(--surface); animation: slide .26s cubic-bezier(.2,.8,.2,1); }
+@keyframes slide { from { transform: translateY(100%); } }
+.panel h2 { margin: 0 4px 4px; font-size: 18px; }
+.hint { margin: 0 4px 12px; color: var(--muted); font-size: 13px; }
+.hint b { font-weight: 500; }
+#verbs { overflow-y: auto; overscroll-behavior: contain; }
+.verb { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 8px 4px; border-bottom: 1px solid var(--line); }
+.verb .dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+.verb .what { flex: 1; min-width: 0; }
+.verb .what div:last-child { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.verb time { color: var(--muted); font-size: 12px; }
+.ok, .verb.allowed .dot { color: var(--ok); background-color: currentColor; }
+.hint .ok, .hint .confirmed, .hint .denied, .hint .blocked { background: none; }
+.confirmed, .verb.confirmed .dot { color: #7fc8f0; background-color: currentColor; }
+.denied, .verb.denied .dot { color: var(--warn); background-color: currentColor; }
+.blocked, .verb.blocked .dot { color: var(--bad); background-color: currentColor; }
+
+/* 全屏页：设置 */
+.page { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column; background: var(--bg); animation: push .24s cubic-bezier(.2,.8,.2,1); }
+@keyframes push { from { transform: translateX(100%); } }
+.pagebar { flex: none; display: flex; align-items: center; gap: 4px; padding: calc(var(--safe-top) + 4px) 8px 4px; }
+.pagebar h1 { flex: 1; margin: 0; font-size: 18px; }
+.pagebar .text { min-width: 64px; height: 48px; padding: 0 12px; color: var(--accent-2); font-size: 16px; font-weight: 600; }
+#settings-form { flex: 1; overflow-y: auto; padding: 0 16px calc(var(--safe-bottom) + 24px); overscroll-behavior: contain; }
+h3 { margin: 22px 4px 8px; color: var(--muted); font-size: 13px; font-weight: 500; }
+.group { border-radius: 16px; background: var(--surface); overflow: hidden; }
+.group > * + * { border-top: 1px solid var(--line); }
+.field, .switch, .perm { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 8px 16px; }
+.field > span, .switch > span, .perm > span { flex: none; width: 34%; font-size: 15px; }
+.field small, .switch small, .perm small { display: block; color: var(--muted); font-size: 12px; }
+.field input, .field select { flex: 1; min-width: 0; height: 40px; border: 0; background: none; outline: none; text-align: right; color: var(--fg); }
+.field select { direction: rtl; -webkit-appearance: none; appearance: none; }
+.field.stacked { flex-direction: column; align-items: stretch; }
+.field.stacked > span { width: auto; }
+.field textarea { width: 100%; padding: 10px 12px; border-radius: 10px; border: 0; background: var(--surface-2); outline: none; resize: none; }
+.switch > span { flex: 1; width: auto; }
+.switch input { position: absolute; opacity: 0; pointer-events: none; }
+.switch i { flex: none; position: relative; width: 52px; height: 32px; border-radius: 16px; background: #48434f; transition: background .2s; }
+.switch i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 26px; height: 26px; border-radius: 50%; background: #fff; transition: transform .2s; }
+.switch input:checked + i { background: var(--accent); }
+.switch input:checked + i::after { transform: translateX(20px); }
+.perm { width: 100%; text-align: left; }
+.perm > span { flex: 1; width: auto; }
+.perm .pill { flex: none; padding: 4px 10px; border-radius: 999px; font-size: 12px; background: rgba(239,138,138,.15); color: var(--bad); }
+.perm .pill.on { background: rgba(143,209,143,.15); color: var(--ok); }
+.perm svg { flex: none; width: 18px; height: 18px; color: var(--muted); }
+.perm:active, .verb:active { background: rgba(255,255,255,.04); }
+
+#toast { position: fixed; z-index: 40; left: 50%; bottom: calc(var(--dock) + 24px); transform: translateX(-50%); max-width: 86vw;
+  padding: 10px 16px; border-radius: 999px; background: #3a3540; font-size: 14px; animation: rise .2s; }

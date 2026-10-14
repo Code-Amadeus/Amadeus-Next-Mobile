@@ -18,6 +18,7 @@ class KernelHost(
     private val payloadRoot: File,
     private val node: File,
     private val libs: File,
+    private val opsSocket: File,
     private val listener: Listener,
 ) {
     interface Listener {
@@ -61,6 +62,17 @@ class KernelHost(
     /** 主动杀掉当前进程，交给监管循环重启；用于验证恢复。 */
     fun restart() {
         process?.destroy()
+    }
+
+    /** 单向事件；控制面未就绪时丢弃（识别消息、播放进度都只对当前回合有意义）。 */
+    fun event(method: String, params: JSONObject) {
+        val out = stdin
+        if (!ready || out == null) return
+        try {
+            synchronized(writeLock) { Frame.write(out, JSONObject().put("kind", "evt").put("method", method).put("params", params)) }
+        } catch (e: Exception) {
+            Log.w(TAG, "event $method dropped: ${e.message}")
+        }
     }
 
     fun request(method: String, params: JSONObject = JSONObject(), callback: (Frame.Message) -> Unit) {
@@ -116,6 +128,7 @@ class KernelHost(
             put("TMPDIR", context.cacheDir.path)
             put("HOME", home.path)
             put("AMADEUS_DATA", data.path)
+            put("AMADEUS_OPS_SOCK", opsSocket.path)
         }
         val proc = builder.start()
         process = proc
