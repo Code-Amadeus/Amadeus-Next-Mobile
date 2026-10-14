@@ -140,3 +140,39 @@ test('trimScreens keeps only recent screen reads and images', () => {
   assert.equal(trimmed[5].content[0].text, 'new')
   assert.equal(trimScreens(messages.slice(-1)), undefined)
 })
+
+test('new sessions start empty, old ones can be reopened, and the choice survives a restart', async (t) => {
+  const { brain, events, dir, settled } = await setup(t, [
+    fauxAssistantMessage(fauxText('<zh>第一个会话</zh>')),
+    fauxAssistantMessage(fauxText('<zh>第二个会话</zh>')),
+  ], {})
+  await brain.submit('你好，这是第一段')
+  await settled()
+  const first = brain.conv.id
+
+  // 空会话不会因为连点"新对话"而堆积
+  const fresh = await brain.newSession()
+  assert.notEqual(fresh.id, first)
+  assert.equal((await brain.newSession()).id, fresh.id)
+  assert.deepEqual(brain.history(), [])
+  assert.ok(events.some((e) => e.method === 'session.changed'))
+
+  events.length = 0
+  await brain.submit('第二段话')
+  await settled()
+  const list = brain.listSessions().items
+  assert.deepEqual(list.map((item) => item.title), ['第二段话', '你好，这是第一段'])
+  assert.equal(list[0].current, true)
+
+  await brain.switchSession(first)
+  assert.match(brain.history().at(-1).text, /第一个会话/)
+  await assert.rejects(brain.switchSession(9999), /unknown session/)
+  await brain.close()
+
+  // 重启后回到上次所在的会话
+  const reopened = new Brain({ dataDir: dir, workspace: path.join(dir, 'workspace'), hub: brain.hub, ops: brain.ops, emit: () => {} })
+  await reopened.open()
+  t.after(() => reopened.close())
+  assert.equal(reopened.conv.id, first)
+  assert.match(reopened.history().at(-1).text, /第一个会话/)
+})

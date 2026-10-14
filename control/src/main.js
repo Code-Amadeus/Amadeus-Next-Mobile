@@ -57,6 +57,9 @@ async function main() {
   })
   host.handle('chat.abort', () => { voice.abort(); return brain.abort() })
   host.handle('chat.history', ({ limit }) => ({ items: brain.history(Number(limit) || 50) }))
+  host.handle('session.new', () => { voice.abort(); return brain.newSession() })
+  host.handle('session.list', () => brain.listSessions())
+  host.handle('session.switch', ({ id }) => { voice.abort(); return brain.switchSession(id) })
   host.handle('config.get', () => config.publicView())
   host.handle('config.set', ({ values, secrets }) => config.update({ values, secrets }))
   // 提醒到点、通知到达由宿主触发；requestId 保证宿主重发时不会重复开口

@@ -175,7 +175,7 @@ async function ensureCharacter() {
   // 第一次用某个模型要在手机上烘焙，之后走缓存
   $('#call-error').textContent = '正在准备形象…'
   const baked = await request('emote.prepare', { model: look.model })
-  renderer = createEmoteRenderer($('#stage'), { full: true, top: 0.11, bottom: 0.86 })
+  renderer = createEmoteRenderer($('#stage'), { full: true, upper: { head: 0.04, waist: 0.85, shift: 0.12 } })
   character = await renderer.load(
     { psbUrl: `/emote-cache/${baked.psb}`, metaUrl: `/emote-cache/${baked.meta}`, arm: look.arm },
     (text) => { $('#call-error').textContent = text },
@@ -350,6 +350,62 @@ function sheet(id: string) {
 }
 
 const menu = sheet('menu')
+const sessionsSheet = sheet('sessions')
+
+/** 把聊天区清空并换成当前会话的记录。 */
+async function showSession() {
+  for (const node of [...log.children]) if (node.id !== 'welcome') node.remove()
+  lastSpeaker = null
+  herBubble = null
+  $('#welcome').hidden = false
+  try {
+    const { items } = await request('chat.history', { limit: 60 })
+    for (const item of items) message(item.role === 'assistant' ? 'her' : 'me', item.role === 'assistant' ? displayText(item.text) : item.text)
+  } catch { /* 控制面尚未就绪，后续消息照常显示 */ }
+}
+
+on('session.changed', () => { showSession() })
+
+async function newChat() {
+  vibrate(10)
+  sessionsSheet.close()
+  try { await request('session.new') } catch (error: any) { toast(`新对话失败：${error.message}`) }
+}
+$('#new-chat').addEventListener('click', newChat)
+$('#sessions-new').addEventListener('click', newChat)
+
+function when(at: number): string {
+  const date = new Date(at)
+  const today = new Date()
+  const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  if (date.toDateString() === today.toDateString()) return `今天 ${time}`
+  const yesterday = new Date(today.getTime() - 86_400_000)
+  if (date.toDateString() === yesterday.toDateString()) return `昨天 ${time}`
+  return `${date.getMonth() + 1}月${date.getDate()}日 ${time}`
+}
+
+$('#open-sessions').addEventListener('click', async () => {
+  menu.close()
+  sessionsSheet.open()
+  const list = $('#session-list')
+  list.textContent = ''
+  try {
+    const { items } = await request('session.list')
+    for (const item of items) {
+      const row = document.createElement('button')
+      row.className = `session${item.current ? ' current' : ''}`
+      row.innerHTML = '<div class="what"><div class="title"></div><time></time></div>'
+      row.querySelector('.title')!.textContent = item.title
+      row.querySelector('time')!.textContent = when(item.updatedAt)
+      row.addEventListener('click', async () => {
+        sessionsSheet.close()
+        if (item.current) return
+        try { await request('session.switch', { id: item.id }) } catch (error: any) { toast(`打开失败：${error.message}`) }
+      })
+      list.append(row)
+    }
+  } catch { list.innerHTML = '<p class="hint">暂时读不到历史对话。</p>' }
+})
 const lookSheet = sheet('looks')
 $('#call-look').addEventListener('click', async () => {
   await loadLooks().catch(() => {})
@@ -513,6 +569,4 @@ if (sessionStorage.getItem('resumeCall')) {
   sessionStorage.removeItem('resumeCall')
   startCall()
 }
-request('chat.history', { limit: 40 }).then(({ items }) => {
-  for (const item of items) message(item.role === 'assistant' ? 'her' : 'me', item.role === 'assistant' ? displayText(item.text) : item.text)
-}).catch(() => { /* 控制面尚未就绪，后续消息照常显示 */ })
+showSession()

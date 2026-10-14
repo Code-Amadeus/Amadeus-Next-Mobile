@@ -235,6 +235,11 @@ export function updateEmoteControls(player: ControlPlayer, metadata: EmoteMetada
 type Framing = {
   /** 全身取景用竖向画布；半身沿用 amadeus-next 的 800×600 并裁到上身 42% */
   full?: boolean
+  /**
+   * 全身模型按半身的大小与位置摆放：头顶在 head 处、腰（身高 42% 处）在 waist 处，
+   * 腿自然延伸出屏幕底边，而不是在腰部被画布截断
+   */
+  upper?: { head: number; waist: number; shift?: number }
   /** 人物占据容器高度的区间（0–1），上方留给顶栏、下方留给控制区 */
   top?: number
   bottom?: number
@@ -242,8 +247,9 @@ type Framing = {
   zoom?: number
 }
 
-export function createEmoteRenderer(container: HTMLElement, { full = false, top = 0, bottom = 1, zoom = 1.6 }: Framing = {}) {
-  const LOGICAL = full ? { width: 560, height: 1120 } : { width: 800, height: 600 }
+export function createEmoteRenderer(container: HTMLElement, { full = false, upper, top = 0, bottom = 1, zoom = 1.6 }: Framing = {}) {
+  // 按半身摆放时全身会放大到一屏半高，离屏画布相应加大，避免纹理被拉伸发糊
+  const LOGICAL = full ? (upper ? { width: 800, height: 1600 } : { width: 560, height: 1120 }) : { width: 800, height: 600 }
   const host = window as any
   const PIXI = host.PIXI
   const app = new PIXI.Application({ resizeTo: container, backgroundAlpha: 0, antialias: true, autoDensity: true, resolution: Math.min(2, window.devicePixelRatio || 1) })
@@ -270,6 +276,16 @@ export function createEmoteRenderer(container: HTMLElement, { full = false, top 
   const layout = () => {
     const width = app.renderer.width / app.renderer.resolution
     const height = app.renderer.height / app.renderer.resolution
+    if (full && upper) {
+      // 角色在画布里约占 98% 高度、上下各留 1%；按头顶到腰（42%）这一段换算整张画布的尺寸
+      const body = height * (upper.waist - upper.head) / 0.42
+      sprite.height = body / 0.98
+      sprite.width = sprite.height * LOGICAL.width / LOGICAL.height
+      // 模型的长发与手臂偏在一侧，包围盒居中时身体并不在中线上，用 shift（屏宽比例）挪回来
+      sprite.x = (width - sprite.width) / 2 + width * (upper.shift ?? 0)
+      sprite.y = height * upper.head - sprite.height * 0.01
+      return
+    }
     // 人物底边停在 bottom 处，高度不超过 top 到 bottom 的区间；水平居中
     const floor = height * bottom
     const room = height * (bottom - top)

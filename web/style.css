@@ -132,6 +132,18 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 .menu-item.current { color: var(--teal); background: rgba(98,211,198,.08); }
 .menu-item.current::after { content: "✓"; margin-left: auto; }
 #look-list { display: flex; flex-direction: column; }
+.sheet-head { display: flex; align-items: center; justify-content: space-between; margin: 0 6px 10px; }
+.sheet-head h2 { margin: 0; }
+.pill-button { padding: 8px 14px; border-radius: 999px; border: 1px solid var(--edge); background: var(--glass); color: var(--teal); font-size: 14px; }
+#session-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; }
+.session { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 64px; padding: 10px 10px; border-radius: 14px; text-align: left; }
+.session:active { background: rgba(255,255,255,.04); }
+.session .what { flex: 1; min-width: 0; }
+.session .title { font-size: 15.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.session time { display: block; color: var(--muted); font: 12px var(--mono); }
+.session.current { background: rgba(98,211,198,.08); }
+.session.current .title { color: var(--teal); }
+.session.current::after { content: "当前"; flex: none; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--edge); color: var(--teal); font-size: 11.5px; }
 .panel h2 { margin: 0 6px 4px; font-size: 18px; }
 .hint { margin: 0 6px 10px; color: var(--muted); font-size: 12.5px; }
 .hint b { font-weight: 500; }
