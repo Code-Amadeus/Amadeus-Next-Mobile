@@ -65,7 +65,8 @@ flowchart TB
 | `amadeus-control` | 控制面：`Harness.open(openNodeSqliteStorage(file))` 装配会话与工具循环，`pi-ai` 负责模型与登录 |
 | `amadeus-phone` extension | 动词工具，经 UDS 转发给宿主；纯转发，无业务逻辑 |
 | voice 模块 | 控制面内，移植自 amadeus-next：轮次闸门、口播/字幕拆分、Fish TTS 流式合成 |
-| WebView | 移动端界面：emote 立绘铺满上半屏，对话浮层可上滑展开，底部点按说话 / 键盘切换；动作记录为底部面板，设置为全屏页。只加载 APK 内置页面，不直接碰网络与磁盘 |
+| emote 模块 | 控制面内，移植 amadeus-next 的烘焙器：payload 只带 4 个源模型（约 125 MB），第一次用到某个形象时在手机上烘焙（单个约 200 MB），缓存在私有目录，经 WebViewAssetLoader 交给网页 |
+| WebView | 两种模式：**对话模式**（默认）只有聊天界面，终端式输入框、点按说话；**视频模式**全屏全身立绘、连续语音对话、静音 / 挂断 / 切文字，可换 6 种形象。风格沿用 amadeus-next 桌面端（深青玻璃、等宽字体、琥珀点缀）。只加载 APK 内置页面与烘焙缓存，不直接碰网络 |
 
 ## 三、关键时序
 

@@ -113,3 +113,21 @@ test('abort resets the turn and advances the generation', () => {
   assert.ok(emitted.some((e) => e.params.type === 'reset'))
   assert.equal(hub.busy(), false)
 })
+
+test('a continuous session keeps listening after each turn until stopped', (t) => {
+  mock.timers.enable({ apis: ['setTimeout'] })
+  t.after(() => mock.timers.reset())
+  const { hub, commands } = setup()
+  hub.listen('start', { continuous: true })
+  const first = commands()[0].recognition_id
+  hub.asrMessage({ recognition_id: first, type: 'recognized', text: '你好', is_final: true })
+  hub.onTurnEvent('turn.begin', { turnId: 't1' })
+  hub.onTurnEvent('turn.end', {})
+  mock.timers.tick(SETTLE_MS)
+  // 回合结束、静置之后自动重新开麦
+  assert.equal(commands().at(-1).command, 'start')
+  assert.ok(commands().at(-1).recognition_id > first)
+  hub.listen('stop')
+  assert.equal(hub.session, false)
+  assert.equal(hub.listening, false)
+})

@@ -28,6 +28,8 @@ export class VoiceHub {
     this.submit = submit
     this.makeTts = makeTts ?? ((settings, onEvent) => new FishTts(() => settings(), onEvent))
     this.listening = false
+    // 视频模式的连续对话：只在这一通"通话"里生效，不改设置里的常开监听
+    this.session = false
     this.asrOn = false
     this.hearing = false
     this.finishing = false
@@ -40,15 +42,17 @@ export class VoiceHub {
 
   // ---- 麦克风 ----
 
-  listen(action) {
+  listen(action, { continuous = false } = {}) {
     if (action === 'start') {
       this.listening = true
+      this.session = Boolean(continuous)
       this.#pump()
     } else if (action === 'finish') {
-      if (!this.settings.continuous) this.listening = false
+      if (!this.settings.continuous && !this.session) this.listening = false
       this.#finish(true)
     } else {
       this.listening = false
+      this.session = false
       this.#stopAsr()
     }
     return { state: this.state() }

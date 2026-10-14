@@ -22,6 +22,8 @@ android {
             // 前端、识别模型与 emote 素材，由 scripts/fetch-deps.mjs 与 web/build.mjs 生成
             assets.directories += rootProject.file("../build/assets").path
             jniLibs.directories += rootProject.file("../payload/build/jniLibs").path
+            // 应用图标取自 amadeus-next 的 logo，由 scripts/fetch-deps.mjs 生成
+            res.directories += rootProject.file("../build/res").path
         }
     }
 

@@ -1,6 +1,8 @@
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Brain } from './brain.js'
 import { Config } from './config.js'
+import { EmoteModels } from './emote/models.js'
 import { ModelHub } from './models.js'
 import { Peer } from './peer.js'
 import { OpsClient } from './phone.js'
@@ -14,6 +16,8 @@ for (const level of ['log', 'info', 'debug']) console[level] = (...args) => cons
 const dataDir = process.env.AMADEUS_DATA || path.resolve('data')
 const workspace = process.env.AMADEUS_WORKSPACE || path.join(dataDir, 'workspace')
 const opsSocket = process.env.AMADEUS_OPS_SOCK || path.join(dataDir, 'ops.sock')
+// 源模型随 payload 放在 app/emote/models，烘焙产物缓存在数据目录，宿主让 WebView 从那里读
+const emoteSources = process.env.AMADEUS_EMOTE_SOURCES || fileURLToPath(new URL('../../emote/models', import.meta.url))
 
 async function main() {
   const host = new Peer({
@@ -57,7 +61,10 @@ async function main() {
   host.handle('config.set', ({ values, secrets }) => config.update({ values, secrets }))
   // 提醒到点、通知到达由宿主触发；requestId 保证宿主重发时不会重复开口
   host.handle('proactive', ({ kind, text, requestId }) => voice.proactive(() => brain.proactive(kind, String(text ?? ''), requestId)))
-  host.handle('voice.listen', ({ action }) => voice.listen(action))
+  const emote = new EmoteModels({ sourceDir: emoteSources, cacheDir: path.join(dataDir, 'emote-cache') })
+  host.handle('emote.list', () => ({ looks: emote.list() }))
+  host.handle('emote.prepare', ({ model }) => emote.prepare(String(model)))
+  host.handle('voice.listen', ({ action, continuous }) => voice.listen(action, { continuous }))
   host.on('asr.message', (message) => voice.asrMessage(message))
   host.on('voice.playback', (event) => voice.playback(event))
 

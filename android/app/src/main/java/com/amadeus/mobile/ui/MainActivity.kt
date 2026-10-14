@@ -37,7 +37,12 @@ class MainActivity : Activity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val loader = WebViewAssetLoader.Builder().addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this)).build()
+        // 烘焙好的 emote 模型由控制面写在私有目录，按同源路径交给网页读取
+        val emoteCache = java.io.File(filesDir, "data/emote-cache").apply { mkdirs() }
+        val loader = WebViewAssetLoader.Builder()
+            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
+            .addPathHandler("/emote-cache/", WebViewAssetLoader.InternalStoragePathHandler(this, emoteCache))
+            .build()
         web = Stage(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -48,8 +53,9 @@ class MainActivity : Activity() {
                 override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
                     loader.shouldInterceptRequest(request.url)
 
-                // 页面不能跳到任何外部地址
-                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = true
+                // 页面不能跳到任何外部地址；同源的重新加载（换形象时）放行
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) =
+                    request.url.scheme != "https" || request.url.host != WebViewAssetLoader.DEFAULT_DOMAIN
             }
             addJavascriptInterface(Bridge(), "AmadeusHost")
             isHapticFeedbackEnabled = false

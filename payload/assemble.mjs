@@ -102,6 +102,10 @@ function installControl(root) {
   for (const name of ['package.json', 'src', 'node_modules']) cpSync(path.join(control, name), path.join(target, name), { recursive: true, verbatimSymlinks: true })
   // 依赖包的命令行入口运行时用不到，且全是符号链接
   rmSync(path.join(target, 'node_modules', '.bin'), { recursive: true, force: true })
+  // emote 源模型由 scripts/fetch-deps.mjs 准备；控制面在手机上按需烘焙
+  const models = path.join(repo, 'build', 'emote-models')
+  if (!existsSync(models)) throw new Error('build/emote-models missing; run node scripts/fetch-deps.mjs first')
+  cpSync(models, path.join(root, 'app', 'emote', 'models'), { recursive: true })
 }
 
 const isElf = (file) => {

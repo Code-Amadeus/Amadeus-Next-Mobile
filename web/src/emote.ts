@@ -215,10 +215,11 @@ type Bounds = { x: number; y: number; width: number; height: number }
 type ControlPlayer = Pick<Player, 'setVariable'> & { getVariable(label: string): number }
 
 /** 适配早期 SDK 缺乏复合部件推导与眼睑分离计算的问题。 */
-export function updateEmoteControls(player: ControlPlayer, metadata: EmoteMetadata, table: PartTable): void {
+export function updateEmoteControls(player: ControlPlayer, metadata: EmoteMetadata, table: PartTable, arm: number | null = 1): void {
   const values = Object.fromEntries(metadata.customSelectorList.filter(control => control.enabled).map(control => [control.label, player.getVariable(control.label)]))
   // 强制选定白衣 B 姿态（抱胸立绘），复用共享资源包。
-  if (Object.hasOwn(values, 'arm_type')) values.arm_type = 1
+  // AB 模型的手臂姿态：0 垂手（A）、1 抱臂（B）；C 系列没有这个选择器
+  if (arm !== null && Object.hasOwn(values, 'arm_type')) values.arm_type = arm
   for (const [label, value] of Object.entries(partVariablesFromTable(table, values))) player.setVariable(label, value, 0)
   for (const control of metadata.eyeControl) {
     if (!control.enabled || !control.varL || !control.varR) continue
@@ -231,7 +232,18 @@ export function updateEmoteControls(player: ControlPlayer, metadata: EmoteMetada
  * 手机版渲染器：只有透明背景上的人物，没有 CRT 遮罩、房间背景与闲置静帧。
  * 取景与 E-mote 驱动方式沿用 amadeus-next：角色画到离屏 canvas，再作为 Pixi 纹理按同一节拍上传。
  */
-export function createEmoteRenderer(container: HTMLElement, { bottom = 1 }: { bottom?: number } = {}) {
+type Framing = {
+  /** 全身取景用竖向画布；半身沿用 amadeus-next 的 800×600 并裁到上身 42% */
+  full?: boolean
+  /** 人物占据容器高度的区间（0–1），上方留给顶栏、下方留给控制区 */
+  top?: number
+  bottom?: number
+  /** 半身取景时按宽度放大的倍数，两侧空白可裁掉 */
+  zoom?: number
+}
+
+export function createEmoteRenderer(container: HTMLElement, { full = false, top = 0, bottom = 1, zoom = 1.6 }: Framing = {}) {
+  const LOGICAL = full ? { width: 560, height: 1120 } : { width: 800, height: 600 }
   const host = window as any
   const PIXI = host.PIXI
   const app = new PIXI.Application({ resizeTo: container, backgroundAlpha: 0, antialias: true, autoDensity: true, resolution: Math.min(2, window.devicePixelRatio || 1) })
@@ -243,10 +255,11 @@ export function createEmoteRenderer(container: HTMLElement, { bottom = 1 }: { bo
   const SPEAKING_INTERVAL = 1000 / 30
   let frameInterval = STANDBY_INTERVAL
   let lastFrame = -Infinity
-  let paused = false
+  let hidden = document.hidden
+  let held = false
   const frame = (now: number) => {
     requestAnimationFrame(frame)
-    if (paused || now - lastFrame < frameInterval - 4) return
+    if (hidden || held || now - lastFrame < frameInterval - 4) return
     lastFrame = now
     app.ticker.update(now)
   }
@@ -257,26 +270,35 @@ export function createEmoteRenderer(container: HTMLElement, { bottom = 1 }: { bo
   const layout = () => {
     const width = app.renderer.width / app.renderer.resolution
     const height = app.renderer.height / app.renderer.resolution
-    // 竖屏手机：按宽度放大（人物居中，两侧空白可裁掉），但不超过底边以上的高度；底边停在 bottom 处，下方留给对话浮层
+    // 人物底边停在 bottom 处，高度不超过 top 到 bottom 的区间；水平居中
     const floor = height * bottom
-    const scale = Math.min(width * 1.6 / 800, floor * 0.95 / 600)
-    sprite.width = 800 * scale; sprite.height = 600 * scale
+    const room = height * (bottom - top)
+    const scale = full
+      ? Math.min(width / LOGICAL.width, room / LOGICAL.height)
+      : Math.min(width * zoom / LOGICAL.width, room / LOGICAL.height)
+    sprite.width = LOGICAL.width * scale; sprite.height = LOGICAL.height * scale
     sprite.x = (width - sprite.width) / 2
     sprite.y = floor - sprite.height
   }
   app.renderer.on('resize', layout)
   // 页面不可见时停止出帧，WebGL 与 E-mote 的每帧开销全部省掉
-  document.addEventListener('visibilitychange', () => { paused = document.hidden })
+  document.addEventListener('visibilitychange', () => { hidden = document.hidden })
 
+  let arm: number | null = 1
   const controls = {
     setSpeaking(value: boolean) { frameInterval = value ? SPEAKING_INTERVAL : STANDBY_INTERVAL },
+    /** 同一模型的 A/B 姿态只是一个选择器，下一帧即生效，不用重新加载 */
+    setArm(value: number | null) { arm = value },
+    /** 离开视频模式时停止出帧，WebGL 与 E-mote 的开销全部省掉 */
+    pause(value: boolean) { held = value; if (!value) layout() },
   }
 
-  const load = async (assets: { psbUrl: string; metaUrl: string }, report: (message: string) => void): Promise<EmoteCharacter> => {
+  const load = async (assets: { psbUrl: string; metaUrl: string; arm?: number | null }, report: (message: string) => void): Promise<EmoteCharacter> => {
+    arm = assets.arm === undefined ? 1 : assets.arm
     if (!host.EmoteDriver_Initialized || !host.EmotePlayer) throw new Error('E-mote 运行时不可用')
     const canvas = document.createElement('canvas')
     const ratio = Math.min(2, window.devicePixelRatio || 1)
-    canvas.width = Math.round(800 * ratio); canvas.height = Math.round(600 * ratio)
+    canvas.width = Math.round(LOGICAL.width * ratio); canvas.height = Math.round(LOGICAL.height * ratio)
     const Runtime = host.EmotePlayer
     Runtime.createRenderCanvas(canvas.width, canvas.height)
     const player = new Runtime(canvas)
@@ -291,12 +313,12 @@ export function createEmoteRenderer(container: HTMLElement, { bottom = 1 }: { bo
       if (!variable.id.startsWith('fade_')) player.setVariable(variable.id, variable.defaultValue, 0)
     }
     const bounds = player.charaBounds
-    const bottom = bounds.top + (bounds.bottom - bounds.top) * 0.42
-    const scale = Math.min(canvas.width / (bounds.right - bounds.left), canvas.height / (bottom - bounds.top)) * 0.94
+    const cropBottom = full ? bounds.bottom : bounds.top + (bounds.bottom - bounds.top) * 0.42
+    const scale = Math.min(canvas.width / (bounds.right - bounds.left), canvas.height / (cropBottom - bounds.top)) * (full ? 0.98 : 0.94)
     player.setScale(scale, 0)
-    player.setCoord(-(bounds.left + bounds.right) / 2 * scale, -(bounds.top + bottom) / 2 * scale, 0)
+    player.setCoord(-(bounds.left + bounds.right) / 2 * scale, -(bounds.top + cropBottom) / 2 * scale, 0)
     const character = new EmoteCharacter(player, snaps)
-    player.onUpdate = () => updateEmoteControls(player, metadata, parts)
+    player.onUpdate = () => updateEmoteControls(player, metadata, parts, arm)
     player.onUpdate()
     sprite.texture = PIXI.Texture.from(canvas)
     sprite.visible = true

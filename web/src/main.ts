@@ -4,16 +4,18 @@ import { createEmoteRenderer, type EmoteCharacter } from './emote.ts'
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector(selector) as T
 
 const log = $('#log')
-const chat = $('#chat')
 const input = $<HTMLTextAreaElement>('#input')
-const subtitle = $('#subtitle')
-const stateChip = $('#state')
-const hearing = $('#hearing')
 const mic = $('#mic')
-let character: EmoteCharacter | null = null
-let renderer: ReturnType<typeof createEmoteRenderer> | null = null
-let assistantBubble: HTMLElement | null = null
+const sendButton = $('#send')
+const stopButton = $('#stop')
+const hearing = $('#hearing')
+const callView = $('#call-view')
+const subtitle = $('#subtitle')
+const youSaid = $('#you-said')
+
 let busy = false
+let herBubble: HTMLElement | null = null
+let lastSpeaker: 'me' | 'her' | null = null
 
 const VERB_NAMES: Record<string, string> = {
   observe: '看屏幕', screenshot: '截图', click: '点击', swipe: '滑动', set_value: '输入文字', enter: '确认输入', key: '按键',
@@ -21,6 +23,12 @@ const VERB_NAMES: Record<string, string> = {
   remind_set: '设提醒', remind_list: '看提醒', remind_cancel: '取消提醒', read: '读文件', write: '写文件', edit: '改文件',
 }
 const DECISIONS: Record<string, string> = { allowed: '放行', confirmed: '你确认过', denied: '你拒绝了', blocked: '被拦下' }
+
+// WebView 未开 DOM Storage 时 localStorage 为 null，偏好只是记不住，不能让脚本中断
+const prefs = {
+  get: (key: string) => { try { return localStorage.getItem(key) } catch { return null } },
+  set: (key: string, value: string) => { try { localStorage.setItem(key, value) } catch { /* 忽略 */ } },
+}
 
 const vibrate = (ms: number) => { try { navigator.vibrate?.(ms) } catch { /* 部分 WebView 不支持 */ } }
 
@@ -33,135 +41,242 @@ function toast(text: string) {
   toastTimer = window.setTimeout(() => { el.hidden = true }, 2400)
 }
 
-function setState(text: string | null) {
-  stateChip.hidden = !text
-  if (text) stateChip.textContent = text
-}
-
 // 长按菜单只留给输入框
 document.addEventListener('contextmenu', (event) => {
   if (!(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)) event.preventDefault()
 })
 
-// ---- 对话浮层：收起时只露出最近几条，上滑展开 ----
-
-function setChatExpanded(expanded: boolean) {
-  chat.classList.toggle('expanded', expanded)
-  chat.classList.toggle('collapsed', !expanded)
-  log.scrollTop = log.scrollHeight
+/** 状态同时显示在聊天顶栏和视频模式的胶囊里；null 表示空闲。 */
+function setPresence(text: string | null) {
+  const presence = $('#presence')
+  presence.textContent = text ?? '在线'
+  presence.parentElement!.classList.toggle('busy', Boolean(text))
+  const chip = $('#call-state')
+  chip.hidden = !text
+  if (text) chip.textContent = text
 }
 
-function swipeable(handle: HTMLElement, onUp: () => void, onDown: () => void, onTap?: () => void) {
-  let startY = 0
-  handle.addEventListener('pointerdown', (event) => { startY = event.clientY; handle.setPointerCapture(event.pointerId) })
-  handle.addEventListener('pointerup', (event) => {
-    const dy = event.clientY - startY
-    if (dy < -24) onUp()
-    else if (dy > 24) onDown()
-    else onTap?.()
-  })
+// ---- 对话模式 ----
+
+function scrollToEnd() { log.scrollTop = log.scrollHeight }
+
+function message(who: 'me' | 'her', text: string): HTMLElement {
+  $('#welcome').hidden = true
+  const row = document.createElement('div')
+  row.className = `msg ${who}`
+  if (lastSpeaker !== who) log.append(Object.assign(document.createElement('div'), { className: 'gap' }))
+  if (who === 'her') {
+    const face = document.createElement('img')
+    face.src = 'ui/logo.png'
+    // 连续几条只在第一条显示头像
+    face.className = lastSpeaker === 'her' ? 'face ghost' : 'face'
+    row.append(face)
+  }
+  const bubble = document.createElement('div')
+  bubble.className = 'bubble'
+  bubble.textContent = text
+  row.append(bubble)
+  log.append(row)
+  lastSpeaker = who
+  while (log.childElementCount > 300) log.children[1].remove()
+  scrollToEnd()
+  return bubble
 }
 
-swipeable($('#chat-grip'), () => setChatExpanded(true), () => setChatExpanded(false),
-  () => setChatExpanded(!chat.classList.contains('expanded')))
-log.addEventListener('click', () => { if (chat.classList.contains('collapsed')) setChatExpanded(true) })
-
-function bubble(role: 'user' | 'assistant' | 'notice', text: string): HTMLElement {
-  const item = document.createElement('div')
-  item.className = `bubble ${role}`
-  item.textContent = text
-  log.append(item)
-  while (log.childElementCount > 200) log.firstElementChild!.remove()
-  log.scrollTop = log.scrollHeight
-  return item
+function notice(text: string) {
+  $('#welcome').hidden = true
+  log.append(Object.assign(document.createElement('div'), { className: 'notice', textContent: text }))
+  lastSpeaker = null
+  scrollToEnd()
 }
 
-function setBusy(value: boolean) {
-  busy = value
-  $('#stop').hidden = !value
-  $('#stop-placeholder').hidden = value
+/** 输入框有字时显示发送，没字时显示麦克风；她回复时都换成停止。 */
+function syncComposer() {
+  const typed = input.value.trim().length > 0
+  stopButton.hidden = !busy
+  sendButton.hidden = busy || !typed
+  mic.hidden = busy || typed
 }
 
-// ---- 输入：语音为主，键盘为辅 ----
-
-// WebView 未开 DOM Storage 时 localStorage 为 null，偏好只是记不住，不能让脚本中断
-const prefs = { get: (key: string) => { try { return localStorage.getItem(key) } catch { return null } }, set: (key: string, value: string) => { try { localStorage.setItem(key, value) } catch { /* 忽略 */ } } }
-
-function setMode(mode: 'voice' | 'text') {
-  $('#voice-mode').hidden = mode !== 'voice'
-  $('#text-mode').hidden = mode !== 'text'
-  prefs.set('inputMode', mode)
-  if (mode === 'text') input.focus()
-  else input.blur()
-}
-$('#to-keyboard').addEventListener('click', () => setMode('text'))
-$('#to-voice').addEventListener('click', () => setMode('voice'))
-setMode(prefs.get('inputMode') === 'text' ? 'text' : 'voice')
-
-async function send() {
-  const text = input.value.trim()
+async function send(text: string) {
+  text = text.trim()
   if (!text) return
-  input.value = ''
-  input.style.height = ''
-  bubble('user', text)
+  message('me', text)
   try { await request('chat.submit', { text }) } catch (error: any) {
-    if (error.code === 'not_configured') { toast('先在设置里填好模型'); openSettings() } else bubble('notice', `发送失败：${error.message}`)
+    if (error.code === 'not_configured') { notice('还没有配置模型'); openSettings() } else notice(`发送失败：${error.message}`)
   }
 }
-$('#send').addEventListener('click', send)
-input.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send() }
-})
+
 input.addEventListener('input', () => {
   input.style.height = ''
-  input.style.height = `${Math.min(120, input.scrollHeight)}px`
+  input.style.height = `${Math.min(128, input.scrollHeight)}px`
+  syncComposer()
 })
-$('#stop').addEventListener('click', () => { vibrate(10); request('chat.abort').catch(() => {}) })
+input.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submitInput() }
+})
+function submitInput() {
+  const text = input.value
+  input.value = ''
+  input.style.height = ''
+  syncComposer()
+  send(text)
+}
+sendButton.addEventListener('click', submitInput)
+stopButton.addEventListener('click', () => { vibrate(10); request('chat.abort').catch(() => {}) })
+for (const chip of document.querySelectorAll<HTMLButtonElement>('[data-say]')) chip.addEventListener('click', () => send(chip.dataset.say!))
 
 // 点一下开始听，停顿 1.5 秒自动发送，或再点一下立即发送。
 // 不用"按住说话"：三星等系统的长按识屏会在 1.5 秒左右抢走长按手势，应用层拦不住
-function setListening(value: boolean) {
-  mic.classList.toggle('active', value)
-  mic.querySelector('span')!.textContent = value ? '正在听…点一下发送' : '点一下说话'
+let chatListening = false
+function setChatListening(value: boolean) {
+  chatListening = value
+  mic.classList.toggle('on', value)
+  hearing.hidden = !value
+  if (value) hearing.textContent = '正在听…'
 }
 mic.addEventListener('click', () => {
-  vibrate(15)
-  if (mic.classList.contains('active')) {
-    setListening(false)
+  vibrate(12)
+  if (chatListening) {
+    setChatListening(false)
     request('voice.listen', { action: 'finish' }).catch(() => {})
     return
   }
-  setListening(true)
-  if (busy) request('chat.abort').catch(() => {})
-  request('voice.listen', { action: 'start' }).catch((error) => { setListening(false); toast(`麦克风不可用：${error.message}`) })
+  setChatListening(true)
+  request('voice.listen', { action: 'start' }).catch((error) => { setChatListening(false); toast(`麦克风不可用：${error.message}`) })
 })
 
+// ---- 视频模式 ----
+
+let renderer: ReturnType<typeof createEmoteRenderer> | null = null
+let character: EmoteCharacter | null = null
+let callActive = false
+let muted = false
+let callTimer = 0
+
+// ---- 形象 ----
+
+type Look = { id: string; model: string; arm: number | null; label: string }
+const DEFAULT_LOOK: Look = { id: 'white-b', model: 'kurisu_ab_white', arm: 1, label: '白衣 · 抱臂' }
+let looks: Look[] = []
+let look: Look = DEFAULT_LOOK
+
+async function loadLooks() {
+  if (looks.length) return
+  looks = (await request('emote.list')).looks
+  look = looks.find((item) => item.id === prefs.get('look')) ?? looks[0] ?? DEFAULT_LOOK
+}
+
+async function ensureCharacter() {
+  if (renderer) return
+  $('#call-error').textContent = ''
+  await loadLooks()
+  await (window as any).loadEmoteRuntime()
+  // 第一次用某个模型要在手机上烘焙，之后走缓存
+  $('#call-error').textContent = '正在准备形象…'
+  const baked = await request('emote.prepare', { model: look.model })
+  renderer = createEmoteRenderer($('#stage'), { full: true, top: 0.11, bottom: 0.86 })
+  character = await renderer.load(
+    { psbUrl: `/emote-cache/${baked.psb}`, metaUrl: `/emote-cache/${baked.meta}`, arm: look.arm },
+    (text) => { $('#call-error').textContent = text },
+  )
+  $('#call-error').textContent = ''
+  setInterval(() => { if (callActive) character?.dispatch({ type: 'tick', now: performance.now() }) }, 50)
+}
+
+function listenInCall() {
+  if (muted) return request('voice.listen', { action: 'stop' }).catch(() => {})
+  return request('voice.listen', { action: 'start', continuous: true }).catch((error) => toast(`麦克风不可用：${error.message}`))
+}
+
+async function startCall() {
+  if (callActive) return
+  callActive = true
+  callView.hidden = false
+  subtitle.hidden = true
+  youSaid.hidden = true
+  $('#call-timer').textContent = '正在接通…'
+  overlays.push(() => (callActive ? (endCall(), true) : false))
+  setChatListening(false)
+  try {
+    await ensureCharacter()
+    renderer?.controls.pause(false)
+  } catch (error) {
+    $('#call-error').textContent = `立绘加载失败：${(error as Error).message}`
+  }
+  if (!callActive) return
+  const started = Date.now()
+  const tick = () => {
+    const s = Math.floor((Date.now() - started) / 1000)
+    $('#call-timer').textContent = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+  }
+  tick()
+  callTimer = window.setInterval(tick, 1000)
+  listenInCall()
+}
+
+function endCall() {
+  if (!callActive) return
+  callActive = false
+  clearInterval(callTimer)
+  request('voice.listen', { action: 'stop' }).catch(() => {})
+  if (busy) request('chat.abort').catch(() => {})
+  renderer?.controls.pause(true)
+  callView.hidden = true
+}
+
+$('#start-call').addEventListener('click', () => { vibrate(12); startCall() })
+$('#end-call').addEventListener('click', () => { vibrate(20); endCall() })
+$('#call-to-chat').addEventListener('click', () => { endCall(); input.focus() })
+$('#call-mute').addEventListener('click', () => {
+  vibrate(12)
+  muted = !muted
+  $('#call-mute').classList.toggle('muted', muted)
+  $('#mute-label').textContent = muted ? '已静音' : '静音'
+  listenInCall()
+})
+
+// ---- 语音识别 ----
+
 on('voice.asr', ({ status, text, error }) => {
-  if (status === 'listening') { setState('正在听'); hearing.hidden = false; hearing.textContent = '…' }
-  else if (status === 'partial') { hearing.hidden = false; hearing.textContent = text }
-  else if (status === 'final') { hearing.hidden = true; setListening(false); bubble('user', text) }
-  else if (status === 'error') { hearing.hidden = true; setListening(false); setState(null); toast(error) }
-  else if (status === 'idle') { hearing.hidden = true; setListening(false); if (!busy) setState(null) }
+  if (status === 'listening') {
+    if (callActive) setPresence('正在听')
+  } else if (status === 'partial') {
+    if (callActive) { youSaid.hidden = false; youSaid.textContent = text } else hearing.textContent = text
+  } else if (status === 'final') {
+    setChatListening(false)
+    youSaid.hidden = true
+    message('me', text)
+  } else if (status === 'error') {
+    setChatListening(false)
+    youSaid.hidden = true
+    toast(error)
+  } else if (status === 'idle') {
+    if (!callActive) setChatListening(false)
+    if (!busy) setPresence(null)
+  }
 })
 
 // ---- 回合 ----
 
 on('turn.begin', () => {
-  setBusy(true)
-  assistantBubble = null
+  busy = true
+  herBubble = null
   subtitle.textContent = ''
   subtitle.hidden = true
-  setState('思考中')
+  setPresence('思考中…')
+  syncComposer()
 })
 on('turn.tool', ({ phase, name, isError, summary }) => {
-  if (phase === 'start') setState(`正在${VERB_NAMES[name] ?? name}`)
-  else if (isError) bubble('notice', `${VERB_NAMES[name] ?? name}没成功：${String(summary || '').split('\n')[0]}`)
+  if (phase === 'start') setPresence(`正在${VERB_NAMES[name] ?? name}`)
+  else if (isError) notice(`${VERB_NAMES[name] ?? name}没成功：${String(summary || '').split('\n')[0]}`)
 })
 on('turn.notice', ({ text }) => toast(text))
-on('turn.error', ({ message }) => bubble('notice', `出错了：${message}`))
+on('turn.error', ({ message: text }) => notice(`出错了：${text}`))
 on('turn.end', () => {
-  setBusy(false)
-  setState(null)
+  busy = false
+  setPresence(null)
+  syncComposer()
 })
 
 // 语音事件：字幕、表情与口型；音频本身由宿主的 AudioTrack 播放
@@ -177,12 +292,15 @@ on('voice.event', (event) => {
     const value = event.value
     const display = value.display ?? value.text
     if (display) {
-      assistantBubble ??= bubble('assistant', '')
-      assistantBubble.textContent += display
-      log.scrollTop = log.scrollHeight
-      subtitle.hidden = false
-      subtitle.textContent = (subtitle.textContent + display).slice(-60)
-      if (stateChip.textContent === '思考中') setState(null)
+      herBubble ??= message('her', '')
+      herBubble.textContent += display
+      scrollToEnd()
+      if (callActive) {
+        youSaid.hidden = true
+        subtitle.hidden = false
+        subtitle.textContent = (subtitle.textContent + display).slice(-70)
+      }
+      if (busy && $('#presence').textContent === '思考中…') setPresence('正在说话')
     }
     for (const cue of value.cues) character?.dispatch({ type: 'cue', emotion: cue.emotion })
   } else if (event.type === 'reset') {
@@ -205,7 +323,7 @@ on('voice.playback', ({ type, rms }) => {
   renderer?.controls.setSpeaking(type === 'playing' || type === 'level')
   if (type === 'ended') {
     clearTimeout(subtitleTimer)
-    subtitleTimer = window.setTimeout(() => { if (!busy) subtitle.hidden = true }, 2000)
+    subtitleTimer = window.setTimeout(() => { if (!busy) subtitle.hidden = true }, 2500)
   }
 })
 
@@ -215,7 +333,52 @@ on('kernel.state', ({ state, detail }) => {
   banner.textContent = `${state === 'STARTING' ? '正在醒来' : state === 'RESTARTING' ? '正在恢复' : '已停止'}：${detail}`
 })
 
-// ---- 动作记录（底部面板） ----
+// ---- 菜单、动作记录 ----
+
+/** 打开的浮层按栈管理，安卓返回键从最上层开始关。 */
+const overlays: (() => boolean)[] = []
+
+function sheet(id: string) {
+  const el = $(`#${id}`)
+  const close = () => { if (el.hidden) return false; el.hidden = true; return true }
+  el.querySelector('.scrim')!.addEventListener('click', close)
+  const grip = el.querySelector('.grip') as HTMLElement
+  let startY = 0
+  grip.addEventListener('pointerdown', (event) => { startY = event.clientY; grip.setPointerCapture(event.pointerId) })
+  grip.addEventListener('pointerup', (event) => { if (event.clientY - startY > -24) close() })
+  return { open: () => { el.hidden = false; overlays.push(close) }, close }
+}
+
+const menu = sheet('menu')
+const lookSheet = sheet('looks')
+$('#call-look').addEventListener('click', async () => {
+  await loadLooks().catch(() => {})
+  const list = $('#look-list')
+  list.textContent = ''
+  for (const item of looks) {
+    const row = document.createElement('button')
+    row.className = `menu-item${item.id === look.id ? ' current' : ''}`
+    row.textContent = item.label
+    row.addEventListener('click', () => {
+      lookSheet.close()
+      if (item.id === look.id) return
+      prefs.set('look', item.id)
+      if (item.model === look.model && renderer) {
+        look = item
+        renderer.controls.setArm(item.arm)
+        return
+      }
+      // 换模型要整页重载：E-mote 旧运行时释放不了 WebGL 堆，重载是唯一干净的办法；重载后自动回到视频模式
+      sessionStorage.setItem('resumeCall', '1')
+      location.reload()
+    })
+    list.append(row)
+  }
+  lookSheet.open()
+})
+
+const activity = sheet('activity')
+$('#open-menu').addEventListener('click', () => menu.open())
 
 function verbRow(entry: any): HTMLElement {
   const row = document.createElement('div')
@@ -229,21 +392,11 @@ function verbRow(entry: any): HTMLElement {
   return row
 }
 
-on('verb.log', (entry) => {
-  if (!$('#activity').hidden) $('#verbs').prepend(verbRow(entry))
-})
-
-/** 打开的浮层按栈管理，安卓返回键从最上层开始关。 */
-const overlays: (() => boolean)[] = []
-
-const activitySheet = $('#activity')
-const closeActivity = () => { if (activitySheet.hidden) return false; activitySheet.hidden = true; return true }
-activitySheet.querySelector('.scrim')!.addEventListener('click', closeActivity)
-swipeable(activitySheet.querySelector('.grip') as HTMLElement, () => {}, closeActivity, closeActivity)
+on('verb.log', (entry) => { if (!$('#activity').hidden) $('#verbs').prepend(verbRow(entry)) })
 
 $('#open-activity').addEventListener('click', async () => {
-  activitySheet.hidden = false
-  overlays.push(closeActivity)
+  menu.close()
+  activity.open()
   const verbs = $('#verbs')
   try {
     const { items } = await request('audit.list', { limit: 100 })
@@ -253,7 +406,7 @@ $('#open-activity').addEventListener('click', async () => {
   } catch { /* 服务未就绪时保持空 */ }
 })
 
-// ---- 设置（全屏页） ----
+// ---- 设置 ----
 
 const form = $<HTMLFormElement>('#settings-form')
 const field = (name: string) => form.elements.namedItem(name) as HTMLInputElement
@@ -279,9 +432,7 @@ async function renderPermissions() {
     row.innerHTML = `<span></span><b class="pill ${ok ? 'on' : ''}">${ok ? '已开启' : '去开启'}</b><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>`
     const name = row.querySelector('span')!
     name.textContent = label
-    const small = document.createElement('small')
-    small.textContent = hint
-    name.append(small)
+    name.append(Object.assign(document.createElement('small'), { textContent: hint }))
     row.addEventListener('click', () => request('host.open', { target }).catch(() => {}))
     group.append(row)
   }
@@ -309,8 +460,8 @@ async function loadSettings() {
 
 const settingsPage = $('#settings')
 const closeSettings = () => { if (settingsPage.hidden) return false; settingsPage.hidden = true; return true }
-
 function openSettings() {
+  menu.close()
   settingsPage.hidden = false
   overlays.push(closeSettings)
   loadSettings()
@@ -343,10 +494,9 @@ $('#save').addEventListener('click', async () => {
   }
 })
 
-// 安卓返回键：先关最上层的浮层，没有可关的再交给系统
+// 安卓返回键：先关最上层的浮层（含视频模式），没有可关的再交给系统
 ;(window as any).amadeus.back = (): boolean => {
   while (overlays.length) if (overlays.pop()!()) return true
-  if (chat.classList.contains('expanded')) { setChatExpanded(false); return true }
   return false
 }
 
@@ -358,27 +508,11 @@ function displayText(raw: string): string {
   return zh || raw.replace(/<[^>]+>/g, '')
 }
 
-async function boot() {
-  // Pixi 与 E-mote 运行时由 index.html 异步加载，必须等它们就绪后再建渲染器
-  try { renderer = createEmoteRenderer($('#stage'), { bottom: 0.78 }) } catch (error) {
-    $('#stage-error').textContent = `立绘不可用：${(error as Error).message}`
-  }
-  if (renderer) {
-    try {
-      character = await renderer.load(
-        { psbUrl: 'emote/kurisu_ab_white.psb', metaUrl: 'emote/kurisu_ab_white.meta.json' },
-        (message) => { $('#stage-error').textContent = message },
-      )
-      setInterval(() => character?.dispatch({ type: 'tick', now: performance.now() }), 50)
-    } catch (error) {
-      $('#stage-error').textContent = `立绘加载失败：${(error as Error).message}`
-    }
-  }
-  try {
-    const { items } = await request('chat.history', { limit: 30 })
-    for (const item of items) bubble(item.role, item.role === 'assistant' ? displayText(item.text) : item.text)
-  } catch { /* 控制面尚未就绪，后续消息照常显示 */ }
+syncComposer()
+if (sessionStorage.getItem('resumeCall')) {
+  sessionStorage.removeItem('resumeCall')
+  startCall()
 }
-
-if ((window as any).EmotePlayer) boot()
-else window.addEventListener('amadeus:runtime-ready', () => boot(), { once: true })
+request('chat.history', { limit: 40 }).then(({ items }) => {
+  for (const item of items) message(item.role === 'assistant' ? 'her' : 'me', item.role === 'assistant' ? displayText(item.text) : item.text)
+}).catch(() => { /* 控制面尚未就绪，后续消息照常显示 */ })

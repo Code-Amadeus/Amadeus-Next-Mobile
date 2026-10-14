@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // 准备不进 git 的构建输入：第三方二进制按锁定的 sha256 下载，主人自己的 emote 素材从 amadeus-next 复制。
-// 用法：node scripts/fetch-deps.mjs  （可用 AMADEUS_NEXT / AMADEUS_EMOTE_CACHE 覆盖素材来源）
+// 用法：node scripts/fetch-deps.mjs  （可用 AMADEUS_NEXT 覆盖素材来源）
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -12,7 +12,6 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const cache = path.join(repo, '.cache', 'deps')
 const assets = path.join(repo, 'build', 'assets')
 const next = process.env.AMADEUS_NEXT || path.resolve(repo, '..', 'amadeus-next')
-const emoteCache = process.env.AMADEUS_EMOTE_CACHE || path.join(os.homedir(), 'Library/Application Support/amadeus-next/emote-cache/kurisu_ab_white')
 
 const DOWNLOADS = {
   sherpaAar: {
@@ -75,15 +74,23 @@ async function main() {
   copyPinned(path.join(next, 'resources/character/emote/FreeMoteDriver.js'), path.join(emote, 'FreeMoteDriver.js'))
   copyPinned(path.join(next, 'resources/character/emote/emoteplayer.js'), path.join(emote, 'emoteplayer.js'))
   copyPinned(path.join(next, 'resources/scene/stage/vendor/pixi.min.js'), path.join(emote, 'pixi.min.js'))
-  // 烘焙产物取最新的一份；amadeus-next 首次打开场景时生成
-  const baked = readdirSync(emoteCache)
-    .map((name) => path.join(emoteCache, name))
-    .filter((dir) => existsSync(path.join(dir, 'kurisu_ab_white.psb')) && existsSync(path.join(dir, 'kurisu_ab_white.meta.json')))
-    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0]
-  if (!baked) throw new Error(`没有找到烘焙好的 emote 模型：${emoteCache}（先在 amadeus-next 里打开一次场景）`)
-  for (const name of ['kurisu_ab_white.psb', 'kurisu_ab_white.meta.json']) copyFileSync(path.join(baked, name), path.join(emote, name))
+  // 只带源模型（每个几十 MB），烘焙产物（每个 200 MB 以上）由手机上的控制面第一次使用时生成
+  const models = path.join(repo, 'build', 'emote-models')
+  rmSync(models, { recursive: true, force: true })
+  for (const model of ['kurisu_ab_white', 'kurisu_ab', 'kurisu_c_white', 'kurisu_c']) {
+    cpSync(path.join(next, 'resources/character/emote/models', model), path.join(models, model), { recursive: true })
+  }
 
-  console.log(`sherpa-onnx AAR → android/app/libs; ASR model → build/assets/asr; emote (${path.basename(baked).slice(0, 12)}) → build/assets/web/emote`)
+  // 头像、应用图标与视频模式的字幕框，沿用 amadeus-next 的素材
+  const ui = path.join(assets, 'web', 'ui')
+  mkdirSync(ui, { recursive: true })
+  copyFileSync(path.join(next, 'docs/logo.png'), path.join(ui, 'logo.png'))
+  copyFileSync(path.join(next, 'resources/scene/ui/subtitle_frame.png'), path.join(ui, 'subtitle_frame.png'))
+  const mipmap = path.join(repo, 'build', 'res', 'mipmap-xxxhdpi')
+  mkdirSync(mipmap, { recursive: true })
+  execFileSync('sips', ['-z', '192', '192', path.join(next, 'docs/logo.png'), '--out', path.join(mipmap, 'ic_launcher.png')], { stdio: 'ignore' })
+
+  console.log('sherpa-onnx AAR → android/app/libs; ASR model → build/assets/asr; emote runtime → build/assets/web/emote; source models → build/emote-models; logo → launcher icon')
 }
 
 main().catch((error) => {
