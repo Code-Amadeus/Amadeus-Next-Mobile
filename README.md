@@ -1,5 +1,11 @@
 # amadeus-mobile
 
+> **社区实验性项目 / Community experimental project**
+>
+> 暂由 [@Mieluoxxx](https://github.com/Mieluoxxx) 独立维护。[Amadeus 主仓库](https://github.com/Code-Amadeus/Amadeus)仍是 Code Amadeus 的主要项目与入口。
+>
+> Currently independently maintained by [@Mieluoxxx](https://github.com/Mieluoxxx). [Amadeus](https://github.com/Code-Amadeus/Amadeus) remains the main project and entry point for Code Amadeus.
+
 红莉栖的安卓本体。设计见 [docs/mobile-apk-plan.md](docs/mobile-apk-plan.md)。
 
 ## 目录
