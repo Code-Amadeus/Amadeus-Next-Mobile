@@ -1,7 +1,6 @@
 package com.amadeus.mobile.host
 
 import android.content.Context
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
@@ -18,13 +17,6 @@ class AuditLog(context: Context) {
             if (file.length() > LIMIT) file.renameTo(File(file.path + ".1"))
             file.appendText(entry.toString() + "\n")
         }
-    }
-
-    fun recent(limit: Int): JSONArray {
-        val lines = synchronized(lock) { if (file.exists()) file.readLines() else emptyList() }
-        val out = JSONArray()
-        for (line in lines.takeLast(limit).asReversed()) runCatching { out.put(JSONObject(line)) }
-        return out
     }
 
     companion object {

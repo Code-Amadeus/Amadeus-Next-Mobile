@@ -13,6 +13,14 @@ import java.util.zip.ZipInputStream
  * 每个文件都按清单校验 sha256，清单之外的条目一律拒绝，防止被篡改的 payload 写出目录。
  */
 class PayloadInstaller(private val context: Context) {
+    companion object {
+        /** 解压结束时的进度 */
+        const val EXTRACTED = 80
+        const val INSTALLED = 85
+        /** 拉起控制面时的进度；就绪后横幅直接隐藏 */
+        const val LAUNCHING = 90
+    }
+
     private val base = File(context.filesDir, "payload")
     val root = File(base, "root")
     private val marker = File(base, "installed")
@@ -21,12 +29,13 @@ class PayloadInstaller(private val context: Context) {
 
     private data class Entry(val sha256: String, val exec: Boolean)
 
-    fun ensureInstalled(progress: (String) -> Unit): String {
+    /** @param progress 安装进度百分比（0–[INSTALLED]）与说明 */
+    fun ensureInstalled(progress: (Int, String) -> Unit): String {
         val manifest = context.assets.open("manifest.json").use { JSONObject(it.readBytes().toString(Charsets.UTF_8)) }
         val id = manifest.getString("id")
         if (root.isDirectory && marker.isFile && marker.readText() == id) return id
 
-        progress("安装 payload $id")
+        progress(0, "安装 payload $id")
         val staging = File(base, "staging")
         staging.deleteRecursively()
         staging.mkdirs()
@@ -40,6 +49,7 @@ class PayloadInstaller(private val context: Context) {
         }
 
         var written = 0
+        var reported = 0
         context.assets.open("payload.zip").use { raw ->
             ZipInputStream(raw.buffered(1 shl 16)).use { zip ->
                 while (true) {
@@ -51,7 +61,13 @@ class PayloadInstaller(private val context: Context) {
                     val actual = copyHashing(zip, target)
                     if (actual != expected.sha256) throw InstallException("sha256 mismatch: ${entry.name}")
                     if (expected.exec && !target.setExecutable(true, true)) throw InstallException("chmod failed: ${entry.name}")
-                    if (++written % 2000 == 0) progress("已解压 $written / ${files.size}")
+                    written++
+                    // 解压占安装的绝大部分时间，按百分比变化上报，避免一万多个文件逐个刷界面
+                    val percent = written * EXTRACTED / files.size
+                    if (percent != reported) {
+                        reported = percent
+                        progress(percent, "已解压 $written / ${files.size}")
+                    }
                 }
             }
         }
@@ -75,7 +91,7 @@ class PayloadInstaller(private val context: Context) {
         root.deleteRecursively()
         if (!staging.renameTo(root)) throw InstallException("cannot move staging to root")
         marker.writeText(id)
-        progress("payload $id 安装完成（${files.size} 个文件）")
+        progress(INSTALLED, "payload $id 安装完成（${files.size} 个文件）")
         return id
     }
 

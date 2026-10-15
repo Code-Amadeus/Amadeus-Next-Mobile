@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.Looper
 import androidx.lifecycle.LifecycleService
 import com.amadeus.mobile.phone.CameraExec
+import com.amadeus.mobile.phone.PhoneAccessibilityService
 import com.amadeus.mobile.ui.MainActivity
 import com.amadeus.mobile.voice.Player
 import com.amadeus.mobile.voice.Recognizer
@@ -29,6 +30,8 @@ class KernelService : LifecycleService() {
     companion object {
         private const val CHANNEL = "kernel"
         private const val NOTIFICATION_ID = 1
+        /** 安装的唤醒锁上限，异常卡住时也不会一直耗电 */
+        private const val INSTALL_WAKE_MS = 10 * 60_000L
 
         fun start(context: Context) {
             context.startForegroundService(Intent(context, KernelService::class.java))
@@ -38,6 +41,9 @@ class KernelService : LifecycleService() {
     private var host: KernelHost? = null
     private var ops: OpsServer? = null
     private var camera: CameraExec? = null
+    private val main = Handler(Looper.getMainLooper())
+    /** 只在主线程上读写 */
+    private val agent = com.amadeus.mobile.host.AgentActivity()
     private lateinit var player: Player
     private lateinit var recognizer: Recognizer
     lateinit var router: VerbRouter
@@ -69,18 +75,25 @@ class KernelService : LifecycleService() {
 
     private fun boot() {
         val installer = PayloadInstaller(this)
+        // 解压一万多个文件要几十秒；熄屏后 CPU 一休眠就停在半路，主人亮屏前控制面都起不来
+        val awake = getSystemService(android.os.PowerManager::class.java)
+            .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "amadeus:payload-install")
+        awake.acquire(INSTALL_WAKE_MS)
         val libs = try {
-            installer.ensureInstalled { Kernel.publish(KernelHost.State.STARTING, it) }
+            installer.ensureInstalled { percent, detail -> Kernel.publish(KernelHost.State.STARTING, detail, percent) }
             installer.linkNativeLibraries()
         } catch (e: Exception) {
             Kernel.publish(KernelHost.State.STOPPED, "payload 安装失败：${e.message}")
             return
+        } finally {
+            if (awake.isHeld) awake.release()
         }
         val socket = File(filesDir, "run/ops.sock")
         ops = OpsServer(socket, router).also { it.start() }
         val kernel = KernelHost(this, installer.root, installer.nodeExecutable(), libs, socket, object : KernelHost.Listener {
             override fun onState(state: KernelHost.State, detail: String) {
-                Kernel.publish(state, detail)
+                // 安装之后只剩拉起控制面一步，等它报就绪
+                Kernel.publish(state, detail, if (state == KernelHost.State.STARTING) PayloadInstaller.LAUNCHING else null)
                 Handler(Looper.getMainLooper()).post { promote(if (state == KernelHost.State.READY) "红莉栖在线" else "正在恢复") }
                 if (state == KernelHost.State.READY) onReady()
             }
@@ -109,6 +122,20 @@ class KernelService : LifecycleService() {
         val method = head.optString("method")
         val params = head.optJSONObject("params") ?: JSONObject()
         when (method) {
+            "turn.begin" -> main.post { agent.turnBegin(Kernel.appResumed); refreshAgent() }
+            "turn.tool" -> main.post {
+                if (params.optString("phase") == "start") agent.toolStart(params.optString("name")) else agent.toolEnd()
+                refreshAgent()
+            }
+            "turn.end" -> main.post {
+                val a11y = PhoneAccessibilityService.instance
+                if (agent.turnEnd(foregroundIsApp())) a11y?.bringAppToFront()
+                // 主人不在 Amadeus 里时不切回，但她拉下的通知栏要收好；主人接管了就原样留给主人
+                else if (!agent.takenOver) a11y?.collapseShade()
+                refreshAgent()
+            }
+        }
+        when (method) {
             "asr.command" -> recognizer.command(params)
             "voice.event" -> {
                 player.event(params, message.body)
@@ -131,6 +158,38 @@ class KernelService : LifecycleService() {
     }
 
     fun restartControl() = host?.restart()
+
+    private fun foregroundIsApp(): Boolean {
+        // 通知栏盖在 Amadeus 上时 Activity 仍是 resumed，有无障碍服务就以活动窗口为准
+        val a11y = PhoneAccessibilityService.instance ?: return Kernel.appResumed
+        return a11y.foregroundPackage() == packageName
+    }
+
+    /** 按当前状态显示或隐藏"她正在操作"的浮层。 */
+    fun refreshAgent() {
+        main.post {
+            val overlay = PhoneAccessibilityService.instance?.overlay ?: return@post
+            val state = agent.overlay(foregroundIsApp())
+            if (state.visible) overlay.show(state.text) else overlay.hide()
+        }
+    }
+
+    /** 主人点了浮层上的「接管」：中止这一轮，手机交还给主人，结束后也不切回 Amadeus。 */
+    fun takeOver() {
+        main.post {
+            if (agent.takeOver()) request("chat.abort") { }
+            refreshAgent()
+        }
+    }
+
+    /** 主人点了「终止」：中止这一轮并立刻回到 Amadeus。 */
+    fun stopTask() {
+        main.post {
+            if (agent.takeOver()) request("chat.abort") { }
+            PhoneAccessibilityService.instance?.bringAppToFront()
+            refreshAgent()
+        }
+    }
 
     override fun onDestroy() {
         host?.stop()
@@ -174,6 +233,8 @@ class KernelService : LifecycleService() {
 object Kernel {
     @Volatile var service: KernelService? = null
     @Volatile var notifyPackages: Set<String> = emptySet()
+    /** Amadeus 的界面是否在前台；决定回合结束后要不要切回 */
+    @Volatile var appResumed = false
     /** 网页的事件入口：方法名、参数 JSON、序号（0 表示不进日志的瞬时事件）。 */
     @Volatile var web: ((String, String, Long) -> Unit)? = null
     /** 发往界面的事件日志；放在服务进程里，Activity 重建后照样能补拉。 */
@@ -183,9 +244,9 @@ object Kernel {
     @Volatile var last: Pair<KernelHost.State, String> = KernelHost.State.STARTING to ""
         private set
 
-    fun publish(state: KernelHost.State, detail: String) {
+    fun publish(state: KernelHost.State, detail: String, progress: Int? = null) {
         last = state to detail
-        webEvent("kernel.state", JSONObject().put("state", state.name).put("detail", detail))
+        webEvent("kernel.state", JSONObject().put("state", state.name).put("detail", detail).apply { if (progress != null) put("progress", progress) })
         main.post { listeners.toList().forEach { it(state, detail) } }
     }
 

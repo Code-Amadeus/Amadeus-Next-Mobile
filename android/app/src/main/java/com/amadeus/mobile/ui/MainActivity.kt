@@ -74,6 +74,8 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        Kernel.appResumed = true
+        Kernel.service?.refreshAgent()
         // 回到前台时让网页按序号补拉后台期间的事件
         dispatch("ui.resume", "{}", 0)
         ConfirmGate.presenter = object : ConfirmGate.Presenter {
@@ -92,6 +94,8 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        Kernel.appResumed = false
+        Kernel.service?.refreshAgent()
         ConfirmGate.presenter = null
         super.onPause()
     }
@@ -188,11 +192,6 @@ class MainActivity : Activity() {
                     reply(id, JSONObject().put("status", "done").put("latest", replay.latest).put("complete", replay.complete).put("events", events))
                 }
                 "host.open" -> { runOnUiThread { open(args.optString("target")) }; reply(id, JSONObject().put("status", "done")) }
-                "audit.list" -> {
-                    val service = Kernel.service
-                    reply(id, if (service == null) JSONObject().put("status", "error").put("message", "服务未启动")
-                    else JSONObject().put("status", "done").put("items", service.router.recentAudit(args.optInt("limit", 100))))
-                }
                 else -> {
                     val service = Kernel.service ?: return reply(id, JSONObject().put("status", "error").put("message", "服务未启动"))
                     service.request(method, args) { message ->

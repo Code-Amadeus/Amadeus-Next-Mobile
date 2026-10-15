@@ -5,6 +5,8 @@ import { createRegistry, Harness, watchEvents } from '@earendil-works/pi-durable
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node'
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node'
 import { coreExtension } from './agent.js'
+import { createMemoryService, isMemoryEntry, isMemoryMessage } from './memory/index.ts'
+import { notFromUser } from './memory/turns.ts'
 import { phoneExtension } from './phone.js'
 import { SessionIndex } from './sessions.js'
 
@@ -35,6 +37,8 @@ export class Brain {
     const registry = createRegistry()
     registry.install(coreExtension(this.workspace))
     registry.install(phoneExtension(this.ops))
+    this.memory = this.#startMemory()
+    for (const extension of this.memory?.extensions ?? []) registry.install(extension)
     const storage = await openNodeSqliteStorage(path.join(this.dataDir, 'sessions.sqlite'))
     this.harness = await Harness.open(storage, {
       models: this.hub.models,
@@ -43,14 +47,61 @@ export class Brain {
       settings: { retry: { maxRetries: 2 }, stream: { timeoutMs: 180_000 } },
     }, context)
     const ref = this.hub.ref()
-    const root = await this.harness.root(context, ref ? { agent: { model: ref } } : undefined)
+    const root = await this.harness.root(context, ref ? { agent: { model: ref, thinkingLevel: this.hub.thinkingLevel() } } : undefined)
     this.sessions = new SessionIndex(this.dataDir)
-    // 早于会话索引的根会话也要出现在历史里
-    if (!this.sessions.find(root.id)) this.sessions.add(root.id)
     const saved = this.sessions.current === null ? undefined : await this.harness.conversation(this.sessions.current, context)
-    await this.#attach(saved ?? root)
-    if (!this.sessions.find(this.conv.id)) this.sessions.add(this.conv.id)
+    if (saved) await this.#attach(saved)
+    else if (this.sessions.isDeleted(root.id)) await this.#attach(await this.#create())
+    else await this.#attach(root)
+    // 早于会话索引、已有内容的会话补进历史；空会话等第一次发出时再记
+    if (!this.sessions.find(this.conv.id) && this.history(1).length) this.sessions.add(this.conv.id)
     this.harness.resume()
+  }
+
+  /** 记忆只是增强：起不来就本次运行不带记忆，对话照常。 */
+  #startMemory() {
+    try {
+      return createMemoryService({
+        dir: path.join(this.dataDir, 'memory'),
+        models: this.hub.models,
+        post: ({ type, name, ...params }) => this.emit(name, params),
+      })
+    } catch (error) {
+      console.error('memory is disabled for this run', error)
+      return undefined
+    }
+  }
+
+  /** memory.* 命令（列表、编辑、开关等），给界面用。 */
+  memoryCommand(command, params) {
+    if (!this.memory) throw Object.assign(new Error('memory is unavailable'), { code: 'unavailable' })
+    return this.memory.handle(command, params ?? {})
+  }
+
+  /** 主人说过几轮话；提醒与通知不算。 */
+  #userTurns() {
+    let count = 0
+    for (const entry of this.entries.values()) {
+      const message = entry.model?.[0]
+      if (message?.role !== 'user' || isMemoryEntry(entry) || isMemoryMessage(message)) continue
+      const text = typeof message.content === 'string' ? message.content : message.content.filter((b) => b.type === 'text').map((b) => b.text).join('')
+      if (!notFromUser(text)) count++
+    }
+    return count
+  }
+
+  /** 提交前把记忆快照与召回放进对话；读不出来也要照常回答主人。 */
+  async #prepareMemory(text, fromUser) {
+    if (!this.memory) return
+    try {
+      await this.memory.prepare(this.harness, this.conv, context, {
+        turn: this.#userTurns() + 1,
+        sessionId: String(this.conv.id),
+        ...(fromUser ? { input: text } : { report: true }),
+      })
+    } catch (error) {
+      console.error('memory.prepare failed', error)
+    }
   }
 
   /** 把事件流挂到另一个会话上；旧会话的流先停掉。 */
@@ -71,15 +122,30 @@ export class Brain {
 
   get busy() { return this.turn !== null && this.turn !== undefined }
 
+  #create() {
+    const ref = this.hub.ref()
+    return this.harness.createConversation({ ownership: { kind: 'ownerless' }, ...(ref ? { agent: { model: ref, thinkingLevel: this.hub.thinkingLevel() } } : {}) }, context)
+  }
+
+  /** 新对话先不进历史：没发过话就离开的空会话不留痕迹，第一次 submit 时才登记。 */
   async newSession() {
     // 当前会话还是空的就直接复用，免得连点"新对话"堆出一串空会话
     if (!this.history(1).length) return this.#changed()
     if (this.busy) await this.abort()
-    const ref = this.hub.ref()
-    const conversation = await this.harness.createConversation({ ownership: { kind: 'ownerless' }, ...(ref ? { agent: { model: ref } } : {}) }, context)
-    this.sessions.add(conversation.id)
-    await this.#attach(conversation)
+    await this.#attach(await this.#create())
     return this.#changed()
+  }
+
+  /** 删的是当前会话就换到一个空白新对话，不自动跳进别的历史。 */
+  async deleteSession(id) {
+    if (!this.sessions.find(id)) throw Object.assign(new Error(`unknown session: ${id}`), { code: 'not_found' })
+    this.sessions.remove(id)
+    if (id === this.conv.id) {
+      if (this.busy) await this.abort()
+      await this.#attach(await this.#create())
+      this.#changed()
+    }
+    return this.listSessions()
   }
 
   async switchSession(id) {
@@ -94,7 +160,8 @@ export class Brain {
   }
 
   listSessions() {
-    return { items: this.sessions.list() }
+    // 停在还没登记的新对话里时，索引记的 current 是上一个会话，按实际所在的会话标
+    return { items: this.sessions.list().map((item) => ({ ...item, current: item.id === this.conv.id })) }
   }
 
   #changed() {
@@ -104,21 +171,24 @@ export class Brain {
     return info
   }
 
-  /** 配置里的模型变了就改当前会话的 agent；未配置时不改，提交时再报错。 */
+  /** 配置里的模型或思考等级变了就改当前会话的 agent；未配置时不改，提交时再报错。 */
   async syncModel() {
     const ref = this.hub.ref()
     if (!ref || !this.conv) return
+    const thinkingLevel = this.hub.thinkingLevel()
     const agent = await this.conv.agent(context)
-    if (agent.model?.provider !== ref.provider || agent.model?.modelId !== ref.modelId) {
-      await this.conv.configure({ model: ref }, context)
+    if (agent.model?.provider !== ref.provider || agent.model?.modelId !== ref.modelId || agent.thinkingLevel !== thinkingLevel) {
+      await this.conv.configure({ model: ref, thinkingLevel }, context)
     }
   }
 
   async submit(text, { source = 'text', requestId } = {}) {
     if (!this.hub.ref()) throw Object.assign(new Error('model is not configured'), { code: 'not_configured' })
     await this.syncModel()
+    await this.#prepareMemory(text, source === 'text' || source === 'voice')
     const submission = await this.conv.submit({ type: 'input', content: text, ...(requestId ? { requestId } : {}) }, context)
     this.turns.set(submission.id, { source })
+    if (!this.sessions.find(this.conv.id)) this.sessions.add(this.conv.id)
     // 标题只取主人说的话，提醒与通知不当标题
     this.sessions.touch(this.conv.id, source === 'text' || source === 'voice' ? text : '')
     return { turnId: submission.id }
@@ -140,7 +210,8 @@ export class Brain {
     const items = []
     for (const entry of this.entries.values()) {
       const message = entry.model?.[0]
-      if (!message) continue
+      // 记忆快照与召回片段是以 user 角色注入给模型看的，不是主人说的话
+      if (!message || isMemoryEntry(entry) || isMemoryMessage(message)) continue
       if (message.role === 'user') {
         const text = typeof message.content === 'string' ? message.content : message.content.filter((b) => b.type === 'text').map((b) => b.text).join('')
         items.push({ role: 'user', text, at: message.timestamp })
@@ -205,17 +276,25 @@ export class Brain {
         }
         break
       }
-      case 'run_end':
+      case 'run_end': {
+        const source = this.turns.get(this.turn)?.source
+        // 只在主人开口的回合之后抽取；事件批里不能等它，失败只记日志
+        if (this.memory && (source === 'text' || source === 'voice')) {
+          this.memory.afterTurn(this.harness, this.conv, context, { sessionId: String(this.conv.id) })
+            .catch((error) => console.error('memory.afterTurn failed', error))
+        }
         this.emit('turn.end', { turnId: this.turn })
         this.turns.delete(this.turn)
         this.turn = null
         this.tool = null
         break
+      }
     }
   }
 
   async close() {
     await this.stream?.stop().catch(() => {})
+    await this.memory?.close().catch(() => {})
     await this.harness?.close(context).catch(() => {})
   }
 }

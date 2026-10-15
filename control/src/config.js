@@ -2,6 +2,7 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'n
 import path from 'node:path'
 
 export const MODEL_APIS = ['openai-responses', 'anthropic-messages', 'openai-completions']
+export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high']
 
 const DEFAULTS = {
   model: { api: 'openai-responses', baseUrl: '', modelId: '', reasoning: true, vision: true, contextWindow: 200_000, maxTokens: 16_000 },
@@ -60,6 +61,7 @@ export class Config {
     if (values) {
       const next = merge(this.values(), values)
       if (!MODEL_APIS.includes(next.model.api)) throw Object.assign(new Error(`unsupported model api: ${next.model.api}`), { code: 'bad_args' })
+      if (!THINKING_LEVELS.includes(next.thinkingLevel)) throw Object.assign(new Error(`unsupported thinking level: ${next.thinkingLevel}`), { code: 'bad_args' })
       writeAtomic(this.#configFile, next, 0o600)
     }
     if (secrets) {

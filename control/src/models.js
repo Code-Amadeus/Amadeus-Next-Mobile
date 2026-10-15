@@ -1,9 +1,10 @@
-import { createModels, createProvider, envApiKeyAuth } from '@earendil-works/pi-ai'
+import { createModels, createProvider, envApiKeyAuth, getSupportedThinkingLevels } from '@earendil-works/pi-ai'
 import { anthropicMessagesApi } from '@earendil-works/pi-ai/api/anthropic-messages.lazy'
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy'
 
 export const PROVIDER_ID = 'amadeus'
+const DEFAULT_THINKING_LEVEL = 'medium'
 const KEY_ENV = 'AMADEUS_MODEL_API_KEY'
 
 const APIS = {
@@ -68,5 +69,15 @@ export class ModelHub {
     }
     const { model } = this.config.values()
     return isConfigured(model, this.config.secret('modelApiKey')) ? { provider: PROVIDER_ID, modelId: model.modelId } : undefined
+  }
+
+  /** 配置的思考等级按当前模型能力收敛：非推理模型只有 off，不支持的档位退回默认档。 */
+  thinkingLevel() {
+    const ref = this.ref()
+    const model = ref ? this.models.getModel(ref.provider, ref.modelId) : undefined
+    const levels = model ? getSupportedThinkingLevels(model) : ['off']
+    const wanted = this.config.values().thinkingLevel
+    if (levels.includes(wanted)) return wanted
+    return levels.includes(DEFAULT_THINKING_LEVEL) ? DEFAULT_THINKING_LEVEL : levels[0] ?? 'off'
   }
 }

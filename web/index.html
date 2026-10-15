@@ -128,8 +128,8 @@
     <button class="menu-item" id="open-sessions">
       <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2"/></svg><span>历史对话</span>
     </button>
-    <button class="menu-item" id="open-activity">
-      <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h13"/></svg><span>她做过的事</span>
+    <button class="menu-item" id="open-memory">
+      <svg viewBox="0 0 24 24"><path d="M12 4a4 4 0 0 0-4 4 3.5 3.5 0 0 0-3 5.5A3.5 3.5 0 0 0 8 19h1v1h6v-1h1a3.5 3.5 0 0 0 3-5.5A3.5 3.5 0 0 0 16 8a4 4 0 0 0-4-4zM12 4v16"/></svg><span>长期记忆</span>
     </button>
     <button class="menu-item" id="open-settings">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6a7 7 0 0 0 0 2.4l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6A7 7 0 0 0 19 12z"/></svg><span>设置</span>
@@ -161,14 +161,16 @@
   </div>
 </div>
 
-<!-- 动作记录 -->
-<div class="sheet" id="activity" hidden>
+<!-- 长期记忆 -->
+<div class="sheet" id="memory" hidden>
   <div class="scrim"></div>
   <div class="panel tall">
     <div class="grip"><span></span></div>
-    <h2>她做过的事</h2>
-    <p class="hint">每个动作都经过 Guard 判决：<b class="ok">放行</b> · <b class="confirmed">你确认过</b> · <b class="denied">你拒绝了</b> · <b class="blocked">被拦下</b></p>
-    <div id="verbs"></div>
+    <div class="sheet-head">
+      <h2>长期记忆</h2>
+      <button class="pill-button" id="memory-add">＋ 添加</button>
+    </div>
+    <div id="memory-body"></div>
   </div>
 </div>
 
@@ -197,6 +199,15 @@
       <label class="field"><span>API Key</span><input name="modelApiKey" type="password"></label>
       <label class="switch"><span>能看图</span><input name="vision" type="checkbox"><i></i></label>
       <label class="switch"><span>推理模型</span><input name="reasoning" type="checkbox"><i></i></label>
+      <label class="field"><span>思考等级<small>越高想得越久，回复越慢</small></span>
+        <select name="thinkingLevel">
+          <option value="off">关闭</option>
+          <option value="minimal">极简</option>
+          <option value="low">低</option>
+          <option value="medium">中</option>
+          <option value="high">高</option>
+        </select>
+      </label>
     </div>
 
     <h3>声音</h3>

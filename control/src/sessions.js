@@ -16,15 +16,17 @@ export class SessionIndex {
       const stored = JSON.parse(readFileSync(this.#file, 'utf8'))
       this.current = stored.current ?? null
       this.items = Array.isArray(stored.items) ? stored.items : []
+      this.deleted = Array.isArray(stored.deleted) ? stored.deleted : []
     } catch {
       this.current = null
       this.items = []
+      this.deleted = []
     }
   }
 
   #save() {
     const temporary = `${this.#file}.${process.pid}.tmp`
-    writeFileSync(temporary, JSON.stringify({ current: this.current, items: this.items }))
+    writeFileSync(temporary, JSON.stringify({ current: this.current, items: this.items, deleted: this.deleted }))
     renameSync(temporary, this.#file)
   }
 
@@ -38,6 +40,19 @@ export class SessionIndex {
     this.current = id
     this.#save()
   }
+
+  /**
+   * 从历史里删掉。pi-durable 没有删除会话的接口，记录仍留在 sessions.sqlite；
+   * 记下 id，免得启动时把删掉的根会话当成"早于索引的会话"补回来。
+   */
+  remove(id) {
+    this.items = this.items.filter((item) => item.id !== id)
+    if (!this.deleted.includes(id)) this.deleted.push(id)
+    if (this.current === id) this.current = null
+    this.#save()
+  }
+
+  isDeleted(id) { return this.deleted.includes(id) }
 
   select(id) {
     this.current = id

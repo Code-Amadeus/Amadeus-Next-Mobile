@@ -7,13 +7,11 @@ import com.amadeus.mobile.phone.PhoneAccessibilityService
 import com.amadeus.mobile.phone.Reminders
 import com.amadeus.mobile.phone.Snapshot
 import com.amadeus.mobile.phone.VerbException
-import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.Executors
 
 /**
- * 动词的唯一入口：参数校验 → Guard 判决 →（需确认时）等主人 → 执行 → 审计。
- * 所有动词在一个线程上串行执行：等待确认时其他动作只能排队，代理无法趁机去点确认通知。
+ * 动词的唯一入口：参数校验 → 执行 → 审计。所有动词在一个线程上串行执行。
  */
 class VerbRouter(
     private val context: Context,
@@ -21,6 +19,11 @@ class VerbRouter(
     private val camera: () -> CameraExec?,
 ) {
     class Result(val data: JSONObject, val body: ByteArray? = null, val mime: String? = null)
+
+    private companion object {
+        /** 屏幕比例；更短的滑动按点击处理 */
+        const val MIN_SWIPE = 0.03
+    }
 
     private val worker = Executors.newSingleThreadExecutor { Thread(it, "verbs") }
 
@@ -32,52 +35,25 @@ class VerbRouter(
 
     private fun run(verb: String, args: JSONObject): Result {
         val started = System.currentTimeMillis()
-        var decision = "allowed"
         var code: String? = null
         try {
-            return execute(verb, args) { decision = it }
+            return execute(verb, args)
         } catch (e: VerbException) {
             code = e.code
-            if (e.code == "guard_block" || e.code == "screen_locked" || e.code == "bad_package") decision = "blocked"
-            if (e.code == "user_denied" || e.code == "confirm_timeout") decision = "denied"
             throw e
         } catch (e: Exception) {
             code = "failed"
             throw VerbException("failed", e.message ?: e.javaClass.simpleName)
         } finally {
             val entry = JSONObject().put("at", started).put("verb", verb).put("args", AuditLog.summarize(verb, args))
-                .put("decision", decision).put("ms", System.currentTimeMillis() - started)
+                .put("ms", System.currentTimeMillis() - started)
             if (code != null) entry.put("code", code)
             audit.append(entry)
-            Kernel.webEvent("verb.log", entry)
         }
     }
 
     private fun a11y(): PhoneAccessibilityService =
         PhoneAccessibilityService.instance ?: throw VerbException("a11y_off", "the accessibility service is off; ask the user to enable Amadeus in accessibility settings")
-
-    private fun screenOf(a11y: PhoneAccessibilityService, snapshot: Snapshot) = Guard.Screen(
-        packageName = snapshot.packageName,
-        activity = snapshot.activity,
-        locked = snapshot.locked,
-        hasPassword = snapshot.hasPassword,
-        texts = snapshot.texts,
-        appLabel = Apps.label(a11y, snapshot.packageName),
-    )
-
-    private fun enforce(decision: Guard.Decision, mark: (String) -> Unit) {
-        when (decision) {
-            Guard.Decision.Allow -> Unit
-            is Guard.Decision.Block -> throw VerbException(decision.code, decision.reason)
-            is Guard.Decision.Confirm -> {
-                when (ConfirmGate.ask(context, "红莉栖${decision.prompt}")) {
-                    ConfirmGate.Outcome.ALLOWED -> mark("confirmed")
-                    ConfirmGate.Outcome.DENIED -> throw VerbException("user_denied", "the user declined this action")
-                    ConfirmGate.Outcome.TIMEOUT -> throw VerbException("confirm_timeout", "the user did not confirm within 60 seconds")
-                }
-            }
-        }
-    }
 
     private fun fraction(args: JSONObject, name: String): Float {
         if (!args.has(name)) throw VerbException("bad_args", "$name is required")
@@ -100,26 +76,21 @@ class VerbRouter(
         return snapshot to item
     }
 
-    private fun execute(verb: String, args: JSONObject, mark: (String) -> Unit): Result {
+    private fun execute(verb: String, args: JSONObject): Result {
         when (verb) {
             "observe" -> {
                 val a11y = a11y()
                 val snapshot = a11y.observe()
-                enforce(Guard.judge(verb, emptyMap(), screenOf(a11y, snapshot), null), mark)
                 return Result(JSONObject().put("text", a11y.render(snapshot, args.optString("mode") == "text")))
             }
             "screenshot" -> {
                 val a11y = a11y()
-                // 判决用此刻的屏幕事实；不替换最新快照，以免让模型手里的编号失效
-                val facts = a11y.observe(keep = false)
-                enforce(Guard.judge(verb, emptyMap(), screenOf(a11y, facts), null), mark)
                 val maxWidth = args.optInt("maxWidth", 720).coerceIn(240, 1440)
-                return Result(JSONObject().put("package", facts.packageName), a11y.screenshot(maxWidth), "image/jpeg")
+                return Result(JSONObject().put("package", a11y.foregroundPackage()), a11y.screenshot(maxWidth), "image/jpeg")
             }
-            "click", "set_value", "enter", "swipe", "key" -> return act(verb, args, mark)
+            "click", "set_value", "enter", "swipe", "key" -> return act(verb, args)
             "launch_app" -> {
                 val pkg = args.optString("package")
-                enforce(Guard.judge(verb, mapOf("package" to pkg), null, null), mark)
                 Apps.launch(PhoneAccessibilityService.instance ?: context, pkg)
                 PhoneAccessibilityService.instance?.settle()
                 return Result(JSONObject().put("text", "opened ${Apps.label(context, pkg)}"))
@@ -149,47 +120,35 @@ class VerbRouter(
         }
     }
 
-    private fun act(verb: String, args: JSONObject, mark: (String) -> Unit): Result {
+    private fun act(verb: String, args: JSONObject): Result {
         val a11y = a11y()
         val size = a11y.screenSize()
-        // 判决用此刻的屏幕事实：快照之后可能已经弹出了收银台或密码框
-        val facts = a11y.observe(keep = false)
-        val screen = screenOf(a11y, facts)
         when (verb) {
-            "key" -> {
-                enforce(Guard.judge(verb, emptyMap(), screen, null), mark)
-                a11y.key(args.optString("key"))
-            }
+            "key" -> a11y.key(args.optString("key"))
             "swipe" -> {
-                current(a11y)
-                enforce(Guard.judge(verb, emptyMap(), screen, null), mark)
-                a11y.swipe(
-                    fraction(args, "x1") * size.x, fraction(args, "y1") * size.y,
-                    fraction(args, "x2") * size.x, fraction(args, "y2") * size.y,
-                    args.optLong("ms", 300).coerceIn(50, 3000),
-                )
+                val (x1, y1, x2, y2) = listOf("x1", "y1", "x2", "y2").map { fraction(args, it) }
+                // 起止点重合的 swipe 落下去就是一次点击，绕开了 click 的元素定位，容易误触开关
+                if (Math.hypot((x2 - x1).toDouble(), (y2 - y1).toDouble()) < MIN_SWIPE) {
+                    throw VerbException("bad_args", "start and end are the same point; use click to tap")
+                }
+                a11y.swipe(x1 * size.x, y1 * size.y, x2 * size.x, y2 * size.y, args.optLong("ms", 300).coerceIn(50, 3000))
             }
             "click" -> {
                 if (args.has("ref")) {
                     val (_, item) = item(a11y, args.getString("ref"))
-                    enforce(Guard.judge(verb, emptyMap(), screen, item.label), mark)
                     a11y.clickNode(item)
                 } else {
-                    val snapshot = current(a11y)
                     val x = (fraction(args, "x") * size.x).toInt()
                     val y = (fraction(args, "y") * size.y).toInt()
-                    enforce(Guard.judge(verb, emptyMap(), screen, snapshot.at(x, y)?.label), mark)
                     a11y.tap(x.toFloat(), y.toFloat())
                 }
             }
             "set_value" -> {
                 val (_, item) = item(a11y, args.optString("ref"))
-                enforce(Guard.judge(verb, emptyMap(), screen, item.label), mark)
                 a11y.setText(item, args.optString("text"))
             }
             "enter" -> {
                 val item = if (args.has("ref")) item(a11y, args.getString("ref")).second else null
-                enforce(Guard.judge(verb, emptyMap(), screen, item?.label), mark)
                 a11y.enter(item)
             }
         }
@@ -197,5 +156,4 @@ class VerbRouter(
         return Result(JSONObject())
     }
 
-    fun recentAudit(limit: Int): JSONArray = audit.recent(limit)
 }

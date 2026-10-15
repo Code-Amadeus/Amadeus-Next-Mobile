@@ -48,6 +48,7 @@ class PhoneAccessibilityService : AccessibilityService() {
         @Volatile var instance: PhoneAccessibilityService? = null
             private set
         private const val MAX_NODES = 250
+        private const val SYSTEM_UI = "com.android.systemui"
         private const val SETTLE_QUIET_MS = 300L
         private const val SETTLE_MAX_MS = 2_000L
     }
@@ -60,9 +61,36 @@ class PhoneAccessibilityService : AccessibilityService() {
     @Volatile var latest: Snapshot? = null
         private set
     private val screenshotExecutor = Executors.newSingleThreadExecutor()
+    val overlay by lazy {
+        AgentOverlay(this,
+            onTakeOver = { com.amadeus.mobile.host.Kernel.service?.takeOver() },
+            onStop = { com.amadeus.mobile.host.Kernel.service?.stopTask() })
+    }
 
     override fun onServiceConnected() {
         instance = this
+        com.amadeus.mobile.host.Kernel.service?.refreshAgent()
+    }
+
+    /**
+     * 此刻真正在用户面前的应用。下拉通知栏不会让底下的 Activity 进入 onPause，事件里也只带控件类名，
+     * 所以直接看活动窗口；读不到时退回最近一次窗口切换记下的包名。
+     */
+    fun foregroundPackage(): String = runCatching { rootInActiveWindow?.packageName?.toString() }.getOrNull() ?: currentPackage
+
+    /** 通知栏展开着就收起来。 */
+    fun collapseShade() {
+        if (foregroundPackage() != SYSTEM_UI) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
+        else performGlobalAction(GLOBAL_ACTION_BACK)
+    }
+
+    /** 从无障碍服务的上下文启动：后台启动界面受限，绑定中的无障碍服务属于系统豁免的情形。 */
+    fun bringAppToFront() {
+        // 通知栏展开时启动的界面会被压在下面
+        collapseShade()
+        startActivity(android.content.Intent(this, com.amadeus.mobile.ui.MainActivity::class.java)
+            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
@@ -72,6 +100,7 @@ class PhoneAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         if (instance === this) instance = null
+        overlay.destroy()
         screenshotExecutor.shutdown()
         super.onDestroy()
     }
@@ -81,10 +110,15 @@ class PhoneAccessibilityService : AccessibilityService() {
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val pkg = event.packageName?.toString().orEmpty()
             val cls = event.className?.toString().orEmpty()
+            // 自己的浮层窗口显隐也会发这个事件：当成"回到 Amadeus"会让浮层把自己藏掉，还会让模型的编号无故过期
+            if (pkg == packageName && !cls.startsWith("$packageName.ui.")) return
             // 只有 Activity 级别的切换才记为当前界面；弹出的 Toast、对话框类名不覆盖
             if (pkg.isNotEmpty() && !cls.startsWith("android.widget.")) {
+                val changed = pkg != currentPackage
                 currentPackage = pkg
                 currentActivity = cls
+                // 进出 Amadeus 时浮层跟着显隐
+                if (changed) com.amadeus.mobile.host.Kernel.service?.refreshAgent()
             }
             generation.incrementAndGet()
         }
@@ -196,21 +230,24 @@ class PhoneAccessibilityService : AccessibilityService() {
         val latch = CountDownLatch(1)
         var bitmap: Bitmap? = null
         var failure: Int? = null
-        takeScreenshot(Display.DEFAULT_DISPLAY, screenshotExecutor, object : TakeScreenshotCallback {
-            override fun onSuccess(result: ScreenshotResult) {
-                val hardware = Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
-                bitmap = hardware?.copy(Bitmap.Config.ARGB_8888, false)
-                hardware?.recycle()
-                result.hardwareBuffer.close()
-                latch.countDown()
-            }
+        run {
+            takeScreenshot(Display.DEFAULT_DISPLAY, screenshotExecutor, object : TakeScreenshotCallback {
+                override fun onSuccess(result: ScreenshotResult) {
+                    val hardware = Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
+                    bitmap = hardware?.copy(Bitmap.Config.ARGB_8888, false)
+                    hardware?.recycle()
+                    result.hardwareBuffer.close()
+                    latch.countDown()
+                }
 
-            override fun onFailure(errorCode: Int) {
-                failure = errorCode
-                latch.countDown()
-            }
-        })
-        if (!latch.await(5, TimeUnit.SECONDS)) throw VerbException("timeout", "screenshot timed out")
+                override fun onFailure(errorCode: Int) {
+                    failure = errorCode
+                    latch.countDown()
+                }
+            })
+            latch.await(5, TimeUnit.SECONDS)
+        }
+        if (latch.count > 0) throw VerbException("timeout", "screenshot timed out")
         failure?.let {
             if (it == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) throw VerbException("screenshot_throttled", "screenshots are limited to about one per second")
             throw VerbException("failed", "screenshot failed ($it)")
@@ -242,29 +279,44 @@ class PhoneAccessibilityService : AccessibilityService() {
         var target: AccessibilityNodeInfo? = node
         var depth = 0
         // 语义点击优先：自身不可点时找最近的可点祖先，再不行才按坐标点
+        val bounds = Rect().also { node.getBoundsInScreen(it) }
+        overlay.pointAt(bounds.exactCenterX(), bounds.exactCenterY())
         while (target != null && depth < 5) {
-            if (target.isClickable && target.isEnabled && target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return
+            if (target.isClickable && target.isEnabled && target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                overlay.tapped()
+                return
+            }
             target = target.parent
             depth++
         }
-        val b = Rect().also { node.getBoundsInScreen(it) }
-        tap(b.exactCenterX(), b.exactCenterY())
+        tap(bounds.exactCenterX(), bounds.exactCenterY())
     }
 
-    fun tap(x: Float, y: Float) = gesture(Path().apply { moveTo(x, y) }, 60)
+    fun tap(x: Float, y: Float) {
+        overlay.pointAt(x, y)
+        gesture(x, y, Path().apply { moveTo(x, y) }, 60)
+        overlay.tapped()
+    }
 
-    fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, ms: Long) = gesture(Path().apply { moveTo(x1, y1); lineTo(x2, y2) }, ms)
+    fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, ms: Long) {
+        overlay.pointAt(x1, y1)
+        overlay.dragTo(x2, y2, ms)
+        gesture(x1, y1, Path().apply { moveTo(x1, y1); lineTo(x2, y2) }, ms)
+    }
 
-    private fun gesture(path: Path, ms: Long) {
+    private fun gesture(startX: Float, startY: Float, path: Path, ms: Long) {
         val latch = CountDownLatch(1)
         var ok = false
         val description = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, ms)).build()
-        val accepted = dispatchGesture(description, object : GestureResultCallback() {
-            override fun onCompleted(gestureDescription: GestureDescription?) { ok = true; latch.countDown() }
-            override fun onCancelled(gestureDescription: GestureDescription?) { latch.countDown() }
-        }, null)
-        if (!accepted) throw VerbException("failed", "the system rejected the gesture")
-        if (!latch.await(ms + 3_000, TimeUnit.MILLISECONDS) || !ok) throw VerbException("failed", "the gesture was cancelled")
+        val finished = overlay.clearOf(startX, startY) {
+            val accepted = dispatchGesture(description, object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) { ok = true; latch.countDown() }
+                override fun onCancelled(gestureDescription: GestureDescription?) { latch.countDown() }
+            }, null)
+            if (!accepted) throw VerbException("failed", "the system rejected the gesture")
+            latch.await(ms + 3_000, TimeUnit.MILLISECONDS)
+        }
+        if (!finished || !ok) throw VerbException("failed", "the gesture was cancelled")
     }
 
     fun setText(item: Snapshot.Item, text: String) {
@@ -290,6 +342,7 @@ class PhoneAccessibilityService : AccessibilityService() {
             "HOME" -> GLOBAL_ACTION_HOME
             "RECENTS" -> GLOBAL_ACTION_RECENTS
             "NOTIFICATIONS" -> GLOBAL_ACTION_NOTIFICATIONS
+            "QUICK_SETTINGS" -> GLOBAL_ACTION_QUICK_SETTINGS
             else -> throw VerbException("bad_args", "unknown key: $name")
         }
         if (!performGlobalAction(action)) throw VerbException("failed", "the system rejected $name")

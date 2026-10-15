@@ -61,7 +61,14 @@ async function main() {
   host.handle('chat.state', () => ({ busy: brain.busy, tool: brain.tool ?? null, turnId: brain.turn ?? null, sessionId: brain.conv.id }))
   host.handle('session.new', () => { voice.abort(); return brain.newSession() })
   host.handle('session.list', () => brain.listSessions())
+  host.handle('session.delete', ({ id }) => {
+    if (id === brain.conv.id) voice.abort()
+    return brain.deleteSession(id)
+  })
   host.handle('session.switch', ({ id }) => { voice.abort(); return brain.switchSession(id) })
+  for (const command of ['memory.list', 'memory.write', 'memory.delete', 'memory.accept', 'memory.reject', 'memory.clear', 'memory.status', 'memory.configure']) {
+    host.handle(command, (params) => brain.memoryCommand(command, params))
+  }
   host.handle('config.get', () => config.publicView())
   host.handle('config.set', ({ values, secrets }) => config.update({ values, secrets }))
   // 提醒到点、通知到达由宿主触发；requestId 保证宿主重发时不会重复开口

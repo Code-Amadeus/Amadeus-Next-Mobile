@@ -1,4 +1,6 @@
 import { catchUp, on, request, startSync } from './bridge.ts'
+import { setupMemory } from './memory.ts'
+import { closeSwiped, swipeRow } from './swipe.ts'
 import { createEmoteRenderer, type EmoteCharacter } from './emote.ts'
 
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector(selector) as T
@@ -23,7 +25,6 @@ const VERB_NAMES: Record<string, string> = {
   launch_app: '打开应用', list_apps: '查找应用', wait: '等待', camera_snap: '拍照', camera_clip: '录像',
   remind_set: '设提醒', remind_list: '看提醒', remind_cancel: '取消提醒', read: '读文件', write: '写文件', edit: '改文件',
 }
-const DECISIONS: Record<string, string> = { allowed: '放行', confirmed: '你确认过', denied: '你拒绝了', blocked: '被拦下' }
 
 // WebView 未开 DOM Storage 时 localStorage 为 null，偏好只是记不住，不能让脚本中断
 const prefs = {
@@ -340,15 +341,16 @@ on('voice.playback', ({ type, rms }) => {
   }
 })
 
-on('kernel.state', ({ state, detail }) => {
+on('kernel.state', ({ state, detail, progress }) => {
   const banner = $('#kernel')
   banner.hidden = state === 'READY'
   // 控制面（重新）就绪：重启前进行中的回合不会再有结束事件，以控制面现状为准重新渲染
   if (state === 'READY') render()
-  banner.textContent = `${state === 'STARTING' ? '正在醒来' : state === 'RESTARTING' ? '正在恢复' : '已停止'}：${detail}`
+  banner.textContent = state === 'STARTING' ? `正在唤起Amadeus程序:${progress ?? 0}%`
+    : `${state === 'RESTARTING' ? '正在恢复' : '已停止'}：${detail}`
 })
 
-// ---- 菜单、动作记录 ----
+// ---- 菜单 ----
 
 /** 打开的浮层按栈管理，安卓返回键从最上层开始关。 */
 const overlays: (() => boolean)[] = []
@@ -415,26 +417,46 @@ function when(at: number): string {
   return `${date.getMonth() + 1}月${date.getDate()}日 ${time}`
 }
 
+function emptyHistory(list: HTMLElement) {
+  if (!list.querySelector('.swipe-row:not(.removing)')) list.innerHTML = '<p class="hint">还没有历史对话。</p>'
+}
+
+function sessionRow(item: any, list: HTMLElement): HTMLElement {
+  const row = document.createElement('button')
+  row.className = `session${item.current ? ' current' : ''}`
+  row.innerHTML = '<div class="what"><div class="title"></div><time></time></div>'
+  row.querySelector('.title')!.textContent = item.title
+  row.querySelector('time')!.textContent = when(item.updatedAt)
+  return swipeRow(row, {
+    onTap: async () => {
+      sessionsSheet.close()
+      if (item.current) return
+      try { await request('session.switch', { id: item.id }) } catch (error: any) { toast(`打开失败：${error.message}`) }
+    },
+    onDelete: async () => {
+      vibrate(15)
+      try {
+        await request('session.delete', { id: item.id })
+        return true
+      } catch (error: any) {
+        toast(`删除失败：${error.message}`)
+        return false
+      }
+    },
+    onRemoved: () => emptyHistory(list),
+  })
+}
+
 $('#open-sessions').addEventListener('click', async () => {
   menu.close()
   sessionsSheet.open()
+  closeSwiped()
   const list = $('#session-list')
   list.textContent = ''
   try {
     const { items } = await request('session.list')
-    for (const item of items) {
-      const row = document.createElement('button')
-      row.className = `session${item.current ? ' current' : ''}`
-      row.innerHTML = '<div class="what"><div class="title"></div><time></time></div>'
-      row.querySelector('.title')!.textContent = item.title
-      row.querySelector('time')!.textContent = when(item.updatedAt)
-      row.addEventListener('click', async () => {
-        sessionsSheet.close()
-        if (item.current) return
-        try { await request('session.switch', { id: item.id }) } catch (error: any) { toast(`打开失败：${error.message}`) }
-      })
-      list.append(row)
-    }
+    for (const item of items) list.append(sessionRow(item, list))
+    emptyHistory(list)
   } catch { list.innerHTML = '<p class="hint">暂时读不到历史对话。</p>' }
 })
 const lookSheet = sheet('looks')
@@ -464,34 +486,16 @@ $('#call-look').addEventListener('click', async () => {
   lookSheet.open()
 })
 
-const activity = sheet('activity')
 $('#open-menu').addEventListener('click', () => menu.open())
 
-function verbRow(entry: any): HTMLElement {
-  const row = document.createElement('div')
-  row.className = `verb ${entry.decision}`
-  const args = entry.args && Object.keys(entry.args).length ? JSON.stringify(entry.args) : ''
-  row.innerHTML = '<span class="dot"></span><div class="what"><div></div><div></div></div><time></time>'
-  const [title, detail] = row.querySelectorAll('.what div')
-  title.textContent = `${VERB_NAMES[entry.verb] ?? entry.verb} · ${DECISIONS[entry.decision] ?? entry.decision}`
-  detail.textContent = entry.code ? `${entry.code} ${args}` : args
-  row.querySelector('time')!.textContent = new Date(entry.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  return row
-}
-
-on('verb.log', (entry) => { if (!$('#activity').hidden) $('#verbs').prepend(verbRow(entry)) })
-
-$('#open-activity').addEventListener('click', async () => {
+const memorySheet = sheet('memory')
+const memory = setupMemory($('#memory-body'), { toast, vibrate })
+$('#open-memory').addEventListener('click', () => {
   menu.close()
-  activity.open()
-  const verbs = $('#verbs')
-  try {
-    const { items } = await request('audit.list', { limit: 100 })
-    verbs.textContent = ''
-    for (const entry of items) verbs.append(verbRow(entry))
-    if (!items.length) verbs.innerHTML = '<p class="hint">她还没有动过你的手机。</p>'
-  } catch { /* 服务未就绪时保持空 */ }
+  memorySheet.open()
+  memory.show()
 })
+$('#memory-add').addEventListener('click', () => memory.add())
 
 // ---- 设置 ----
 
@@ -525,6 +529,12 @@ async function renderPermissions() {
   }
 }
 
+/** 非推理模型只能关闭思考，选了也不生效，就不让选。 */
+function syncThinking() {
+  field('thinkingLevel').disabled = !field('reasoning').checked
+}
+field('reasoning').addEventListener('change', syncThinking)
+
 async function loadSettings() {
   const config = await request('config.get').catch(() => null)
   if (config) {
@@ -533,6 +543,8 @@ async function loadSettings() {
     field('modelId').value = config.model.modelId
     field('vision').checked = config.model.vision
     field('reasoning').checked = config.model.reasoning
+    field('thinkingLevel').value = config.thinkingLevel
+    syncThinking()
     field('fishVoiceId').value = config.voice.fishVoiceId
     field('speech').checked = config.voice.speech
     field('continuous').checked = config.voice.continuous
@@ -568,6 +580,7 @@ $('#save').addEventListener('click', async () => {
     await request('config.set', {
       values: {
         model: { api: text('api'), baseUrl: text('baseUrl'), modelId: text('modelId'), vision: data.has('vision'), reasoning: data.has('reasoning') },
+        thinkingLevel: field('thinkingLevel').value,
         voice: { fishVoiceId: text('fishVoiceId'), speech: data.has('speech'), continuous: data.has('continuous') },
         notify: { packages: text('notifyPackages').split(/\s+/).filter(Boolean) },
       },
