@@ -5,3 +5,24 @@ payload/build/
 .cache/
 build/
 android/app/libs/
+
+# emote 模型与运行时、角色素材有版权，不随仓库分发；即使误放到别处也不进 git
+*.psb
+*.psb.m.json
+*.psb.m.resx.json
+*.meta.json
+emote-models/
+**/emote/models/
+emoteplayer.js
+FreeMoteDriver.js
+subtitle_frame.png
+ic_launcher.png
+
+# 本机配置与签名
+local.properties
+*.keystore
+*.jks
+.env
+secrets.json
+*.apk
+*.aab
